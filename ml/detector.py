@@ -24,7 +24,6 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 import httpx
-import joblib
 import numpy as np
 from fastapi import APIRouter, Depends, FastAPI, Header, Response
 from prometheus_client import Counter as PCounter
@@ -33,6 +32,7 @@ from pydantic import BaseModel
 
 import loki
 from features import client_key, exceeded, route_of, window_features
+from model_io import load_bundle, mismatch_text
 from resilience_common.app import create_app
 from resilience_common.config import env
 from resilience_common.events import audit
@@ -89,14 +89,23 @@ class State:
 
 def load_model(st: State) -> None:
     try:
-        st.bundle = joblib.load(MODEL_PATH)
-        MODEL_LOADED.set(1)
-        THRESHOLD.set(st.bundle["threshold"])
-        log_event(log, "detector_model_loaded", path=str(MODEL_PATH), threshold=st.bundle["threshold"], trained_at=st.bundle["trained_at"])
+        st.bundle, mismatch = load_bundle(MODEL_PATH)
     except FileNotFoundError:
         st.bundle = None
         MODEL_LOADED.set(0)
         log_event(log, "detector_model_missing", logging.WARNING, path=str(MODEL_PATH))
+        return
+    except RuntimeError as exc:
+        st.bundle = None
+        MODEL_LOADED.set(0)
+        log_event(log, "detector_model_incompatible", logging.ERROR, path=str(MODEL_PATH), error=str(exc)[:300])
+        return
+    MODEL_LOADED.set(1)
+    THRESHOLD.set(st.bundle["threshold"])
+    log_event(log, "detector_model_loaded", path=str(MODEL_PATH), threshold=st.bundle["threshold"], trained_at=st.bundle["trained_at"],
+              versions=st.bundle.get("versions"))
+    if mismatch:
+        log_event(log, "detector_model_version_mismatch", logging.WARNING, detail=mismatch_text(mismatch))
 
 
 def refresh_allowlist(st: State) -> None:

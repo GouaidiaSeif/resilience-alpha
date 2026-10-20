@@ -17,7 +17,7 @@ fi
 grep -Eq '^DISCORD_WEBHOOK_URL=[^[:space:]]+' .env \
   || echo "Attention : DISCORD_WEBHOOK_URL vide dans .env, les alertes resteront visibles dans Grafana, sans message Discord." >&2
 [ -f ml/model/model.joblib ] \
-  || echo "Attention : ml/model/model.joblib absent, le détecteur ML démarre sans modèle et ne bloque rien (docs/02, section 3.4)." >&2
+  || echo "Attention : ml/model/model.joblib absent (normalement fourni par le dépôt : git pull), le détecteur ML démarre sans modèle et ne bloque rien." >&2
 
 docker compose up -d --build --remove-orphans
 

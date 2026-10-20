@@ -42,7 +42,7 @@ Les sections 9 (front) et 10 (observabilité) sont écrites pour ceux qui ne tou
 | Remédiation autonome (panne → redémarrage → preuve) | Vérifiée sur pile réelle le 2026-10-19 après deux correctifs (`events.py`, proxy Docker) |
 | Front Next.js/Tailwind | Écrit : `frontend/`, conteneur `rsl-frontend` lancé avec la pile (voir `frontend/README.md`) |
 | API de supervision pour le tableau de bord | Non nécessaire pour le front : état des services via la passerelle, incidents via l'audit (voir `frontend/README.md`) |
-| Service de détection ML (`detector`) | Lancé avec la pile : `ml/` (modèle hybride Isolation Forest + bornes + classifieur supervisé, blocage à la passerelle), testé de bout en bout le 2026-10-20. Le modèle s'entraîne sur votre pile (`ml/model/`, hors Git). Voir `docs/02-reprise-idempotence-ml.md` §3 |
+| Service de détection ML (`detector`) | Lancé avec la pile : `ml/` (modèle hybride Isolation Forest + bornes + classifieur supervisé, blocage à la passerelle), testé de bout en bout le 2026-10-20. Modèle entraîné et données d'entraînement publiés (`ml/model/`, `ml/data/train.jsonl`) : rien à entraîner pour lancer la pile. Voir `docs/02-reprise-idempotence-ml.md` §3 |
 | Assistant RAG (Ollama/LangChain), WAF, SIEM, Vault/SOPS, Ansible | Hors de ce dépôt backend |
 
 Les durées indiquées dans ce document (délais de détection, de reprise) sont déduites du code et des valeurs

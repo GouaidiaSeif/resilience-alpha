@@ -1,5 +1,6 @@
 """Entraîne le détecteur hybride et enregistre le modèle (ml/model/model.joblib).
 
+    python ml/train.py --from-file ml/data/train.jsonl   # rejoue l'entraînement du modèle publié (sans la pile)
     python ml/train.py --since 30m                       # lit Loki (voir loki.py pour LOKI_URL depuis le PC)
     python ml/train.py --from-file ml/data/a.jsonl --range 1792444380 1792444740 --save-data ml/data/all.jsonl
 
@@ -15,6 +16,7 @@ Trois composantes, choisies après comparaison (ml/compare.py, docs/02 §3.6) :
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import time
@@ -29,7 +31,9 @@ from sklearn.preprocessing import RobustScaler
 
 import loki
 from features import FEATURES, WINDOW_S, compute_bounds, label_of, sliding_windows
+from model_io import library_versions
 
+ROOT = Path(__file__).resolve().parent.parent
 MODEL_DIR = Path(__file__).resolve().parent / "model"
 MIN_ATTACK_WINDOWS = 20
 
@@ -53,6 +57,17 @@ def load_records(args) -> list[dict]:
     return records
 
 
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def rel(path: str) -> str:
+    try:
+        return Path(path).resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return Path(path).name
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--since", help="période récente lue dans Loki, ex. 30m")
@@ -61,6 +76,7 @@ def main() -> None:
     p.add_argument("--save-data", help="enregistre les lignes brutes (JSONL) pour rejouer l'entraînement")
     p.add_argument("--quantile", type=float, default=0.005, help="part des fenêtres normales tolérées sous le seuil")
     p.add_argument("--trees", type=int, default=300)
+    p.add_argument("--model-dir", type=Path, default=MODEL_DIR, help="dossier de sortie (défaut : ml/model)")
     a = p.parse_args()
     if not (a.since or a.from_file or a.range):
         a.since = "60m"
@@ -69,6 +85,11 @@ def main() -> None:
     if a.save_data:
         Path(a.save_data).parent.mkdir(parents=True, exist_ok=True)
         Path(a.save_data).write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    # Provenance : fichiers relus (chemin relatif au dépôt, empreinte) ou périodes Loki, pour rejouer l'entraînement.
+    sources = [{"file": rel(f), "sha256": sha256(Path(f))} for f in [*(a.from_file or []), *([a.save_data] if a.save_data else [])]]
+    sources += [{"loki_range": [float(x), float(y)]} for x, y in a.range or []]
+    if a.since:
+        sources.append({"loki_since": a.since})
     df = sliding_windows(records)
     df["label"] = df["user_agent"].map(label_of)
     normal, attacks = df[df["label"] == "normal"], df[df["label"] != "normal"]
@@ -92,7 +113,7 @@ def main() -> None:
         classifier = HistGradientBoostingClassifier(max_iter=200, learning_rate=0.1, class_weight="balanced", random_state=42)
         classifier.fit(Xs, ys)
 
-    MODEL_DIR.mkdir(exist_ok=True)
+    a.model_dir.mkdir(parents=True, exist_ok=True)
     meta = {
         "features": FEATURES,
         "window_s": WINDOW_S,
@@ -105,9 +126,12 @@ def main() -> None:
         "windows": int(len(normal)),
         "attack_windows": int(len(attacks)),
         "clients": int(normal["key"].nunique()),
+        "records": len(records),
+        "data": sources,
+        "versions": library_versions(),
     }
-    joblib.dump({"model": forest, "classifier": classifier, **meta}, MODEL_DIR / "model.joblib")
-    (MODEL_DIR / "model.json").write_text(json.dumps({**meta, "supervised": classifier is not None}, indent=2, ensure_ascii=False), encoding="utf-8")
+    joblib.dump({"model": forest, "classifier": classifier, **meta}, a.model_dir / "model.joblib")
+    (a.model_dir / "model.json").write_text(json.dumps({**meta, "supervised": classifier is not None}, indent=2, ensure_ascii=False), encoding="utf-8")
     sup = (f"classifieur supervisé appris sur {len(attacks)} fenêtres d'attaque ({', '.join(meta['attack_types'])})"
            if classifier is not None else f"pas de classifieur supervisé (moins de {MIN_ATTACK_WINDOWS} fenêtres d'attaque étiquetées)")
     print(f"Modèle enregistré : forêt + bornes sur {meta['windows']} fenêtres normales ({meta['clients']} clients), "

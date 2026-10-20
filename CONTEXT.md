@@ -183,3 +183,11 @@ Line endings: `.gitattributes` forces LF on sh/sql/yml/conf/py. CRLF on `01-role
 - To add a service: `services/<name>/app/main.py` with `app = create_app(...)`, then add a compose block, a
   Prometheus target, and an entry in `export_openapi.py`. A new DB schema also needs `01-roles.sh`, `02-schema.sql`
   and `.env.example` changes.
+
+- 2026-10-20 (later): ML requirements split. `ml/requirements.txt` = loose ranges for PC scripts (tested clean
+  installs on Python 3.10 / 3.14; the old exact pins needed Python >= 3.11, which broke installs elsewhere).
+  `ml/requirements-lock.txt` = exact training versions, installed by `ml/Dockerfile`. Model + data now tracked:
+  `ml/model/model.joblib|json`, `ml/data/train.jsonl` (3 502 gateway lines, lab-only). `model.json` stores
+  `versions` and data sha256; `ml/model_io.py` loads with a version check (detector logs
+  `detector_model_version_mismatch`, evaluate.py prints a warning). `train.py --from-file ml/data/train.jsonl`
+  reproduces the shipped model bit for bit (verified). `.gitattributes`: `*.jsonl eol=lf`, `*.joblib binary`.

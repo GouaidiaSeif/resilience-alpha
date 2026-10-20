@@ -1,0 +1,63 @@
+{
+  "features": [
+    "log_requests",
+    "distinct_routes",
+    "frac_4xx",
+    "frac_5xx",
+    "frac_401",
+    "frac_404",
+    "frac_429",
+    "log_logins",
+    "frac_post",
+    "frac_outside_api",
+    "mean_request_time",
+    "max_request_time",
+    "log_mean_bytes",
+    "log_payment_posts"
+  ],
+  "window_s": 30,
+  "threshold": -0.6803149299125035,
+  "quantile": 0.005,
+  "limits": {
+    "log_requests": 4.0739335649619735,
+    "distinct_routes": 10.0,
+    "frac_4xx": 0.6333333333333333,
+    "frac_5xx": 0.3,
+    "frac_401": 0.6333333333333333,
+    "frac_404": 0.3,
+    "frac_429": 0.6333333333333333,
+    "log_logins": 2.4141568686511503,
+    "frac_post": 1.5,
+    "frac_outside_api": 0.3,
+    "mean_request_time": 1.2276666666666667,
+    "max_request_time": 2.5949999999999998,
+    "log_mean_bytes": 10.451017348832636,
+    "log_payment_posts": 2.9188652235829697
+  },
+  "classifier_threshold": 0.5,
+  "attack_types": [
+    "bruteforce",
+    "enumeration",
+    "flood",
+    "payspam",
+    "scan"
+  ],
+  "trained_at": "2026-10-20T17:08:23.230500+00:00",
+  "windows": 709,
+  "attack_windows": 38,
+  "clients": 9,
+  "records": 3502,
+  "data": [
+    {
+      "file": "ml/data/train.jsonl",
+      "sha256": "cfd11694318b96f816d8990a581bb5e0553aa20468974f0cac9583686ea962e9"
+    }
+  ],
+  "versions": {
+    "python": "3.11.9",
+    "scikit-learn": "1.9.1",
+    "numpy": "2.4.6",
+    "joblib": "1.6.0"
+  },
+  "supervised": true
+}

@@ -292,10 +292,16 @@ Source : le journal d'accès JSON de la passerelle (point d'entrée unique), col
 
 ### 3.4 Entraîner le modèle, pas à pas
 
-Depuis le PC Hôte (PowerShell : remplacer `export X=…` par `$env:X="…"`) :
+**Le modèle entraîné et ses données sont publiés dans le dépôt** (`ml/model/model.joblib`, `ml/model/model.json`,
+`ml/data/train.jsonl`) : la pile le charge sans entraînement. Rejouer l'entraînement sans la pile :
+`python ml/train.py --from-file ml/data/train.jsonl` (résultat identique : même seuil, mêmes bornes, mêmes
+scores, vérifié). `model.json` enregistre les versions des bibliothèques et l'empreinte sha256 des données ;
+`ml/requirements-lock.txt` fige ces versions pour l'image Docker du détecteur (détail : `ml/README.md`).
+
+Pour entraîner sur sa propre pile, depuis le PC Hôte (PowerShell : remplacer `export X=…` par `$env:X="…"`) :
 
 ```bash
-# 1. Environnement Python isolé
+# 1. Environnement Python isolé (Python 3.10+ ; versions exactes du modèle publié : ml/requirements-lock.txt)
 python -m venv ml/.venv
 ml/.venv/Scripts/pip install -r ml/requirements.txt          # Linux/macOS : ml/.venv/bin/
 

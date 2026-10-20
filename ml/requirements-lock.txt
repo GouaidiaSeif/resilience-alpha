@@ -1,0 +1,11 @@
+# Versions EXACTES de l'entraînement du modèle publié (ml/model/model.joblib, clé « versions » de model.json).
+# Le modèle est un pickle scikit-learn : le recharger avec d'autres versions peut échouer ou changer les scores.
+# Installé par l'image Docker du détecteur (ml/Dockerfile, Python 3.12). Python 3.11 ou plus récent.
+# Après un ré-entraînement avec d'autres versions, mettre ce fichier à jour avec celles de model.json.
+-r ../libs/common/requirements.txt
+numpy==2.4.6
+pandas==3.0.6
+scipy==1.17.1
+scikit-learn==1.9.1
+joblib==1.6.0
+threadpoolctl==3.7.0

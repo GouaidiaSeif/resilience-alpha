@@ -1,4 +1,11 @@
-# Artefacts locaux : modèle entraîné sur VOS données, exports de journaux.
-model/
-data/
+# Modèle publié et ses données d'entraînement : versionnés, pour que chacun puisse charger ou ré-entraîner.
+#   ml/model/model.joblib + model.json   (versions des bibliothèques et empreinte des données dans model.json)
+#   ml/data/train.jsonl                  (journal d'accès de la passerelle, trafic de laboratoire)
+# Tout autre fichier de ces dossiers reste local (essais, exports, modèles ré-entraînés à part).
+model/*
+!model/model.joblib
+!model/model.json
+data/*
+!data/train.jsonl
 __pycache__/
+.venv/

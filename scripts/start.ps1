@@ -5,7 +5,12 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-function Test-Docker { docker info --format "{{.ServerVersion}}" *> $null; return $LASTEXITCODE -eq 0 }
+function Test-Docker {
+    # PowerShell 5.1 : rediriger le stderr d'un exécutable avec « Stop » lève une exception ; on teste le code retour.
+    $ErrorActionPreference = "Continue"
+    docker info --format "{{.ServerVersion}}" 2>$null | Out-Null
+    return $LASTEXITCODE -eq 0
+}
 
 # 1. Moteur Docker (Docker Desktop est démarré s'il est arrêté)
 if (-not (Test-Docker)) {
@@ -31,7 +36,7 @@ if ($envText -notmatch "(?m)^DISCORD_WEBHOOK_URL=\S+") {
     Write-Warning "DISCORD_WEBHOOK_URL vide dans .env : les alertes resteront visibles dans Grafana, sans message Discord."
 }
 if (-not (Test-Path "ml/model/model.joblib")) {
-    Write-Warning "ml/model/model.joblib absent : le détecteur ML démarre sans modèle et ne bloque rien (docs/02, section 3.4)."
+    Write-Warning "ml/model/model.joblib absent (normalement fourni par le dépôt : git pull) : le détecteur ML démarre sans modèle et ne bloque rien."
 }
 
 # 3. Construction et démarrage

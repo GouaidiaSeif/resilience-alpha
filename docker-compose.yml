@@ -187,7 +187,7 @@ services:
 
   # ───────────────────────── détection ML (lancée avec la pile) ─────────────────────────
   # Note le trafic de la passerelle toutes les 5 s (Loki) et bloque les clients anormaux (passerelle, 403).
-  # Sans modèle (ml/model/model.joblib, voir docs/02 section 3) il tourne à vide et ne bloque rien.
+  # Charge le modèle publié ml/model/model.joblib (versionné) ; sans ce fichier il tourne à vide et ne bloque rien.
   # Ouverture par défaut : détecteur arrêté = la passerelle laisse passer (docker compose stop detector).
   detector:
     build: {context: ., dockerfile: ml/Dockerfile}

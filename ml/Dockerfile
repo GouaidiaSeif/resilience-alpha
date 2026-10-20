@@ -8,13 +8,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Mêmes chemins relatifs que dans le dépôt : ml/requirements.txt inclut ../libs/common/requirements.txt
+# Versions EXACTES de l'entraînement du modèle publié (le .joblib ne se recharge qu'avec elles).
+# Mêmes chemins relatifs que dans le dépôt : ml/requirements-lock.txt inclut ../libs/common/requirements.txt
 COPY libs/common/requirements.txt /build/libs/common/requirements.txt
-COPY ml/requirements.txt /build/ml/requirements.txt
-RUN pip install --no-cache-dir -r /build/ml/requirements.txt
+COPY ml/requirements-lock.txt /build/ml/requirements-lock.txt
+RUN pip install --no-cache-dir -r /build/ml/requirements-lock.txt
 
 COPY libs/common/resilience_common ./resilience_common
-COPY ml/loki.py ml/features.py ml/detector.py ./
+COPY ml/loki.py ml/features.py ml/model_io.py ml/detector.py ./
 
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 USER 10001

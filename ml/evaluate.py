@@ -2,6 +2,7 @@
 
     python ml/evaluate.py --since 15m
     python ml/evaluate.py --range 1792445837 1792446632
+    python ml/evaluate.py --from-file ml/data/eval.jsonl   # lignes JSONL enregistrées (sans la pile)
 
 Affiche, par type de trafic, la part de fenêtres signalées (détection pour les attaques, faux positifs pour le
 normal) et quelle composante les a signalées : forêt, bornes, supervisé.
@@ -10,13 +11,16 @@ normal) et quelle composante les a signalées : forêt, bornes, supervisé.
 from __future__ import annotations
 
 import argparse
+import json
+import sys
 import time
+from pathlib import Path
 
-import joblib
 import pandas as pd
 
 import loki
 from features import exceeded, label_of, sliding_windows
+from model_io import load_bundle, mismatch_text
 from train import MODEL_DIR, parse_since
 
 
@@ -37,14 +41,26 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--since", default="30m")
     p.add_argument("--range", nargs=2, type=float, metavar=("DEBUT", "FIN"))
+    p.add_argument("--from-file", type=Path, help="lignes brutes JSONL au lieu de Loki")
+    p.add_argument("--model", type=Path, default=MODEL_DIR / "model.joblib")
     a = p.parse_args()
-    bundle = joblib.load(MODEL_DIR / "model.joblib")
-    if a.range:
-        start, end = a.range
+    try:
+        bundle, mismatch = load_bundle(a.model)
+    except RuntimeError as exc:
+        sys.exit(str(exc))
+    if mismatch:
+        print(f"Attention, versions différentes de l'entraînement : {mismatch_text(mismatch)}. "
+              "Résultats à confirmer avec ml/requirements-lock.txt.", file=sys.stderr)
+    if a.from_file:
+        records = [json.loads(line) for line in a.from_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     else:
-        end = time.time()
-        start = end - parse_since(a.since)
-    df = sliding_windows(list(loki.fetch(start, end)))
+        if a.range:
+            start, end = a.range
+        else:
+            end = time.time()
+            start = end - parse_since(a.since)
+        records = list(loki.fetch(start, end))
+    df = sliding_windows(records)
     df["label"] = df["user_agent"].map(label_of)
     df = score(bundle, df)
 
