@@ -1,0 +1,114 @@
+# Routes communes aux deux serveurs du WAF (accès direct et relais).
+#
+# Chaque requête (pages comprises) est soumise à la liste des bans et aux blocages du modèle ML : un client banni
+# ne peut ni appeler l'API ni utiliser l'interface (le front appelle l'API avec sa propre adresse, jamais bannie :
+# sans ce contrôle, l'interface contournerait le ban). Seules les vraies pages du front lui sont envoyées ; tout
+# autre chemin part à la passerelle, qui le journalise (le modèle ML voit donc les balayages) et répond 404.
+server_name _;
+server_tokens off;
+access_log /dev/stdout waf_json;
+client_max_body_size 64k;
+
+# Motif renvoyé par le détecteur (X-Block-Reason) : banned | anomaly ; vide = blocage ModSecurity.
+auth_request_set $block_reason $upstream_http_x_block_reason;
+
+location = /waf-health {
+    access_log off;
+    default_type text/plain;
+    return 200 "ok\n";
+}
+
+# ───── Contrôle bans + ML (sous-requête vers la passerelle, qui interroge le détecteur) ─────
+# Ouverture par défaut : passerelle ou détecteur indisponible ou lent (> 300 ms) = la requête passe.
+location = /_ban_check {
+    internal;
+    set $chk http://gateway:8080/_waf/check;
+    proxy_pass $chk;
+    proxy_pass_request_body off;
+    proxy_set_header Content-Length "";
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_connect_timeout 300ms;
+    proxy_read_timeout 300ms;
+    proxy_intercept_errors on;
+    error_page 404 500 502 503 504 = @check_unavailable;
+}
+location @check_unavailable {
+    return 204;
+}
+
+# ───── Réponses de blocage (403) : JSON pour l'API, page HTML pour l'interface ─────
+location @blocked_api {
+    default_type application/json;
+    if ($block_reason = "banned") {
+        return 403 '{"detail":"Adresse IP bannie : contactez l’administrateur de la plateforme"}';
+    }
+    if ($block_reason = "anomaly") {
+        return 403 '{"detail":"Accès temporairement bloqué : trafic anormal détecté"}';
+    }
+    return 403 '{"detail":"Requête rejetée par le pare-feu applicatif"}';
+}
+location @blocked_page {
+    default_type text/html;
+    if ($block_reason = "banned") {
+        return 403 '<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accès bloqué</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f5f1;color:#0e1a2b;font:16px/1.5 system-ui,sans-serif"><main style="max-width:32rem;padding:2rem"><p style="font:600 1.25rem Georgia,serif;margin:0 0 2rem">Resilience Alpha</p><h1 style="font:600 1.75rem Georgia,serif;margin:0 0 .75rem">Adresse IP bannie</h1><p style="color:#4a5263;margin:0">L’accès à la plateforme est bloqué pour votre adresse. Si vous pensez qu’il s’agit d’une erreur, contactez l’administrateur.</p></main></body></html>';
+    }
+    return 403 '<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Accès bloqué</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f5f1;color:#0e1a2b;font:16px/1.5 system-ui,sans-serif"><main style="max-width:32rem;padding:2rem"><p style="font:600 1.25rem Georgia,serif;margin:0 0 2rem">Resilience Alpha</p><h1 style="font:600 1.75rem Georgia,serif;margin:0 0 .75rem">Accès temporairement bloqué</h1><p style="color:#4a5263;margin:0">Votre requête a été bloquée par nos contrôles de sécurité. Réessayez plus tard ; si le problème persiste, contactez l’administrateur.</p></main></body></html>';
+}
+location @notfound_page {
+    default_type text/html;
+    return 404 '<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Page introuvable</title></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#f6f5f1;color:#0e1a2b;font:16px/1.5 system-ui,sans-serif"><main style="max-width:32rem;padding:2rem"><p style="font:600 1.25rem Georgia,serif;margin:0 0 2rem">Resilience Alpha</p><h1 style="font:600 1.75rem Georgia,serif;margin:0 0 .75rem">Page introuvable</h1><p style="color:#4a5263;margin:0 0 1.5rem">Cette adresse ne correspond à aucune page.</p><a href="/" style="color:#1d4a80;font-weight:600">Revenir à l’accueil</a></main></body></html>';
+}
+
+# ───── API : passerelle (routage, contrôle du détecteur, limite des connexions) ─────
+location /api/ {
+    auth_request /_ban_check;
+    error_page 403 = @blocked_api;
+    limit_req zone=waf_per_ip burst=10 nodelay;
+    set $gw http://gateway:8080;
+    proxy_pass $gw;
+    include includes/waf_proxy.conf;
+}
+
+# Route la plus sensible (scénario de déni de service sur les paiements) : rafale plus courte.
+location /api/payments {
+    auth_request /_ban_check;
+    error_page 403 = @blocked_api;
+    limit_req zone=waf_per_ip burst=5 nodelay;
+    set $gw http://gateway:8080;
+    proxy_pass $gw;
+    include includes/waf_proxy.conf;
+}
+
+# ───── Interface (front Next.js) : uniquement ses vraies pages ─────
+# Fichiers statiques : nombreux à chaque page, sans contrôle ni limite de débit (aucune donnée).
+location /_next/static/ {
+    set $fe http://frontend:3001;
+    proxy_pass $fe;
+    include includes/waf_proxy.conf;
+}
+
+# Pages et BFF. Ajouter ici toute nouvelle page du front (sinon elle part à la passerelle et répond 404).
+location ~ ^/(?:$|login$|register$|accounts(?:/|$)|payments(?:/|$)|notifications$|admin/(?:system|audit|security)$|bff/|_next/|icon|favicon\.ico$) {
+    if ($scheme = http) {
+        return 308 https://$host:8443$request_uri;     # pages toujours en HTTPS (cookie de session « Secure »)
+    }
+    auth_request /_ban_check;
+    error_page 403 = @blocked_page;
+    limit_req zone=waf_per_ip burst=20 nodelay;
+    set $fe http://frontend:3001;
+    proxy_pass $fe;
+    include includes/waf_proxy.conf;
+}
+
+# ───── Tout autre chemin (/internal, /metrics, /docs, /.env, /wp-login.php…) : passerelle ─────
+# La passerelle le journalise (le modèle ML voit le balayage) et répond 404 ; le WAF affiche une page HTML.
+location / {
+    auth_request /_ban_check;
+    error_page 403 = @blocked_page;
+    limit_req zone=waf_per_ip burst=10 nodelay;
+    set $gw http://gateway:8080;
+    proxy_pass $gw;
+    include includes/waf_proxy.conf;
+    proxy_intercept_errors on;
+    error_page 404 = @notfound_page;
+}

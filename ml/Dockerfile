@@ -15,9 +15,11 @@ COPY ml/requirements-lock.txt /build/ml/requirements-lock.txt
 RUN pip install --no-cache-dir -r /build/ml/requirements-lock.txt
 
 COPY libs/common/resilience_common ./resilience_common
-COPY ml/loki.py ml/features.py ml/model_io.py ml/detector.py ./
+COPY ml/loki.py ml/features.py ml/model_io.py ml/bans.py ml/detector.py ./
 
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
+# /data : liste des bans persistante (volume detector-data, initialisé avec ce propriétaire)
+RUN mkdir /data && chown 10001:10001 /data
 USER 10001
 
 EXPOSE 8000

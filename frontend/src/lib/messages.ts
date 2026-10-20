@@ -75,6 +75,8 @@ export const AUDIT_ACTIONS = [
   "incident_escalated",
   "incident_suppressed",
   "traffic_blocked",
+  "ip_banned",
+  "ip_unbanned",
 ] as const;
 
 export const AUDIT_SERVICES = ["auth", "accounts", "payments", "remediation", "detector"] as const;

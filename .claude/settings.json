@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(bash \"C:/Users/Seif/AppData/Local/Temp/claude/c--Users-Seif-Desktop-Alpha-resilience-alpha/6ae21731-952a-47f2-a4f1-7ed2f2fd5349/scratchpad/waf_attack_test.sh\" scan bruteforce flood enumeration payspam stuffing)",
+      "Bash(docker exec *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('ml/detector.py',encoding='utf8'\\).read\\(\\)\\); print\\('syntax ok'\\)\")",
+      "Bash(curl -sk -o /dev/null -w \"détecteur arrêté: /api/auth/me %{http_code} en %{time_total}s\\\\n\" https://localhost:8443/api/auth/me)",
+      "Bash(curl -sk -o /dev/null -w \"relancé: %{http_code} en %{time_total}s\\\\n\" https://localhost:8443/api/auth/me)",
+      "Bash(sed -i 's/ resolver_timeout 1s;/ resolver_timeout 500ms;/' gateway/nginx.conf)",
+      "Bash(curl -sk -o /dev/null -w \"détecteur arrêté: %{http_code} en %{time_total}s\\\\n\" https://localhost:8443/api/auth/me)",
+      "Bash(curl -sk -o /dev/null -w \"page: %{http_code} en %{time_total}s\\\\n\" https://localhost:8443/login)"
+    ]
+  }
+}

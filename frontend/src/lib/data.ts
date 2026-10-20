@@ -3,7 +3,7 @@ import "server-only";
 import { cache } from "react";
 
 import { authed } from "./api";
-import type { Account, AuditEvent, Notification, Payment } from "./types";
+import type { Account, AuditEvent, Ban, MlBlock, Notification, Payment } from "./types";
 
 // Lectures mémoïsées le temps d'un rendu : plusieurs sections d'une page partagent la même requête.
 
@@ -26,6 +26,10 @@ export const getAuditEvents = cache((service: string | null, action: string | nu
   if (action) q.set("action", action);
   return authed<AuditEvent[]>(`/api/audit/events?${q.toString()}`);
 });
+
+export const getBans = cache(() => authed<Ban[]>("/api/security/bans"));
+
+export const getMlBlocks = cache(() => authed<MlBlock[]>("/api/security/blocks"));
 
 export const CANARY_USERNAME = "canary-bot";
 

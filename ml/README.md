@@ -6,12 +6,13 @@ Explications complètes, résultats mesurés et limites : **`docs/02-reprise-ide
 |---|---|
 | `features.py` | Variables par client (`IP|agent`) et par fenêtre de 30 s, à partir du journal d'accès de la passerelle |
 | `loki.py` | Lecture de ce journal dans Loki (direct depuis un conteneur, ou via le proxy Grafana depuis le PC) |
-| `traffic.py` | Générateur de trafic : `normal` (base d'apprentissage) et attaques signées (`bruteforce`, `scan`, `enumeration`, `flood`, `payspam`, `stuffing`, option `--slow`) — **laboratoire uniquement** |
+| `traffic.py` | Générateur de trafic (`BASE_URL`, HTTP ou HTTPS du WAF) : `normal` (base d'apprentissage) et attaques signées (`bruteforce`, `scan`, `enumeration`, `flood`, `payspam`, `stuffing`, option `--slow`) — **laboratoire uniquement** |
 | `train.py` | Entraînement du modèle hybride : Isolation Forest + bornes (trafic normal) + classifieur supervisé (attaques étiquetées) → `model/model.joblib` + `model/model.json` |
 | `model_io.py` | Chargement du modèle avec contrôle des versions de bibliothèques (détecteur et `evaluate.py`) |
+| `bans.py` | Liste des IP bannies (manuel, WAF, ML) : persistance, expiration, adresses partagées protégées (docs/02 §3.14) |
 | `compare.py` | Banc d'essai : IF, IF + bornes, ECOD, LOF, One-Class SVM, supervisé, hybrides (docs/02 §3.6) |
 | `evaluate.py` | Taux de détection par attaque et taux de faux positifs |
-| `detector.py` | Service temps réel : note le trafic toutes les 5 s, bloque, alerte la remédiation, trace dans l'audit |
+| `detector.py` | Service temps réel : note le trafic toutes les 5 s, bloque et bannit, bannit après une rafale de blocages du WAF, alerte la remédiation, trace dans l'audit ; API `/api/security/*` de la liste des bans |
 | `Dockerfile` | Image du détecteur, lancé avec la pile (service `detector` de `docker-compose.yml`) ; la passerelle le consulte avant chaque requête (`auth_request`) |
 
 ## Ce qui est publié dans le dépôt

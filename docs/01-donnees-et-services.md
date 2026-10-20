@@ -13,7 +13,7 @@ vérifiées sur la pile en fonctionnement le 2026-10-19 (index, contraintes et d
 2. [Modèle de données](#2-modèle-de-données)
 3. [Socle commun à tous les services](#3-socle-commun-à-tous-les-services)
 4. [Les services un par un](#4-les-services-un-par-un)
-5. [Passerelle Nginx](#5-passerelle-nginx)
+5. [Entrée : WAF et passerelle Nginx](#5-entrée--waf-et-passerelle-nginx)
 6. [Swagger : consulter et régénérer la documentation d'API](#6-swagger--consulter-et-régénérer-la-documentation-dapi)
 7. [Annexes : codes HTTP, événements, glossaire](#7-annexes)
 
@@ -22,10 +22,12 @@ vérifiées sur la pile en fonctionnement le 2026-10-19 (index, contraintes et d
 ## 1. Vue d'ensemble
 
 ```
-Navigateur ──► frontend (Next.js :3001) ──┐
-Client ──────────────────────────────────► gateway (Nginx :8080) ──► auth · accounts · payments · notifications · audit  (/api/*)
-                                            │  └─ avant chaque requête : detector /internal/check (204 ou 403)
-                                            │
+Navigateur / client ──► waf (ModSecurity, :8080 HTTP / :8443 HTTPS) ──► frontend (pages)
+                                 │  contrôle bans + ML de chaque requête            │ appels API
+                                 ▼                                                  ▼
+                           gateway (Nginx, interne) ──► auth · accounts · payments · notifications · audit  (/api/*)
+                                 │  └─ detector /internal/check (204 ou 403) ; /api/security ──► detector
+                                 │
            payments ──/internal/transfer──► accounts          (règlement d'un paiement)
            tous ──/internal/events──► audit, notifications    (événements, au mieux)
            canary ──paiement réel via la passerelle──► … ──alerte──► remediation ──proxy Docker──► conteneurs
@@ -40,8 +42,9 @@ Client ────────────────────────�
 | audit | `audit` | `svc_audit` | 8000 | `/api/audit/*` (admin) |
 | remediation | aucun | aucun | 8000 | non (interne) |
 | canary | aucun | aucun | 8000 | non (interne) |
-| detector (ML) | aucun | aucun | 8000 | non (consulté par la passerelle) |
-| frontend | aucun | aucun | 3001 (publié) | non : il appelle la passerelle |
+| detector (ML) | aucun | aucun | 8000 | `/api/security/*` (admin) ; contrôle avant chaque requête |
+| frontend | aucun | aucun | 3001 (local) | non : servi par le WAF, il appelle la passerelle |
+| waf | aucun | aucun | 8080, 8443 (publiés) | c'est le point d'entrée |
 
 **Conventions transverses**
 
@@ -477,36 +480,69 @@ automatiquement), ouvre deux comptes au premier passage, fait un paiement de **0
 **via la passerelle**, puis contrôle l'intégrité du ledger. Après 3 échecs consécutifs, alerte la remédiation
 (une alerte par service toutes les 30 s au plus). Métriques `canary_*` (voir README 10.2).
 
-### 4.8 detector — détection ML et liste de blocage (interne)
+### 4.8 detector — détection ML et liste des bans
 
-Image `ml/Dockerfile`, code `ml/detector.py`, lancé avec la pile. Aucune base : le modèle est lu dans
-`ml/model/model.joblib` (monté en lecture seule), la liste de blocage est en mémoire.
+Image `ml/Dockerfile`, code `ml/detector.py` et `ml/bans.py`, lancé avec la pile. Aucune base : le modèle est lu
+dans `ml/model/model.joblib` (monté en lecture seule) ; la liste des bans est un fichier JSON sur le volume
+`detector-data` (persistant) ; les blocages ML sont en mémoire.
 
 | Méthode, chemin | Accès | Réponse |
 |---|---|---|
-| `GET /internal/check` | passerelle (`auth_request`, en-tête `X-Client-Key: IP\|agent`) | **204** client autorisé, **403** client bloqué |
+| `GET /internal/check` | passerelle (`auth_request`, en-têtes `X-Client-Key: IP\|agent`, `X-Check-Origin: waf\|gateway`) | **204** autorisé ; **403** avec `X-Block-Reason: banned` (IP bannie) ou `anomaly` (client bloqué) |
+| `GET /api/security/bans` | admin, service | `[{ip, source: manual\|waf\|ml, reason, created_at, until, by, remaining_seconds}]` (`until` null = permanent) |
+| `POST /api/security/bans` | admin | `{ip, reason, duration_minutes?}` → **201** ban ; **422** adresse invalide ou partagée (message explicite) |
+| `DELETE /api/security/bans/{ip}` | admin | `{unbanned: true}` ; **404** si l'IP n'est pas bannie |
+| `GET /api/security/blocks` | admin, service | Clients bloqués par le modèle (comme `/internal/blocked`) |
+| `DELETE /api/security/blocks?client=` | admin | Débloque un client (`IP\|agent`) |
 | `GET /internal/blocked` | admin, service | `[{client, remaining_seconds, score, service}]` |
 | `POST /internal/unblock` | admin, service | `{client}` → `{unblocked: bool}` |
 | `POST /internal/reload` | admin, service | Recharge le modèle → `{loaded: bool}` |
 
 Toutes les 5 s : lit dans Loki les 30 dernières secondes du journal d'accès de la passerelle, calcule les
-variables par client et applique le modèle hybride. Deux évaluations anormales de suite : blocage 10 min, audit
-`traffic_blocked`, alerte `anomaly` à la remédiation (escalade, pas de redémarrage). Jamais bloqués : la sonde et
-le front (adresses de conteneur). Métriques `detector_*` : doc 02, section 3.10.
+variables par client et applique le modèle hybride. Deux évaluations anormales de suite : blocage 10 min, ban de
+l'IP (si elle n'est pas partagée), audit `traffic_blocked` et `ip_banned`, alerte `anomaly` à la remédiation
+(escalade, pas de redémarrage). Lit aussi le journal d'audit ModSecurity : 5 requêtes bloquées par le WAF en
+2 min ⇒ IP bannie 1 h. Jamais bloqués ni bannis : la sonde, le front, le WAF et l'hôte Docker (adresses
+partagées). Métriques `detector_*` et réglages : doc 02, sections 3.10 et 3.14.
 
 ### 4.9 frontend — interface (BFF Next.js)
 
 Image `frontend/Dockerfile` (sortie « standalone », utilisateur non root, système de fichiers en lecture seule),
-conteneur `rsl-frontend` publié sur le port 3001. Seul le serveur Next.js appelle la passerelle
+conteneur `rsl-frontend`, servi par le WAF (`https://<hôte>:8443`) et publié en local seulement
+(`127.0.0.1:3001`, débogage). Page d'administration **Sécurité** (`/admin/security`) : liste des bans, ban et
+levée, clients bloqués par le ML. Seul le serveur Next.js appelle la passerelle
 (`http://gateway:8080`, réseau `web`) ; le jeton JWT reste dans un cookie httpOnly. Adresse fixe `10.250.0.10`,
 exemptée par le détecteur ML (tous les utilisateurs de l'interface la partagent). `GET /bff/ping` sert de
 contrôle de santé du conteneur. Détails : `frontend/README.md`.
 
 ---
 
-## 5. Passerelle Nginx
+## 5. Entrée : WAF et passerelle Nginx
 
-`gateway/nginx.conf` — seul composant exposé (`0.0.0.0:8080`).
+### 5.1 WAF (`waf/`, conteneur `rsl-waf`)
+
+Seul composant publié : 8080 (HTTP) et 8443 (HTTPS, certificat autosigné), plus 18080/18443 en local pour le relais
+d'IP réelle (`scripts/edge_relay.py`, PROXY protocol). ModSecurity + OWASP CRS 4.25 LTS (paranoïa 1, mode `On`),
+règles maison et exclusions documentées (doc 02, section 3.14).
+
+| Chemin | Destination | Particularités |
+|---|---|---|
+| Pages du front (`/`, `/login`, `/register`, `/accounts…`, `/payments…`, `/notifications`, `/admin/{system,audit,security}`, `/bff/…`) | frontend | Redirection 308 vers HTTPS ; contrôle bans + ML ; 20 req/s par IP (rafale 20) |
+| `/_next/static/` | frontend | Fichiers statiques : ni contrôle, ni limite |
+| `/api/` | gateway | Contrôle bans + ML ; 20 req/s par IP (rafale 10 ; `/api/payments` : rafale 5) ; HTTP et HTTPS |
+| Tout autre chemin | gateway | Journalisé par la passerelle (le modèle ML voit les balayages) ; page HTML « Page introuvable » |
+| `= /waf-health` | — | 200 `ok` (santé du conteneur) |
+
+Réponses de blocage : 403 JSON sur l'API (« Adresse IP bannie… », « Accès temporairement bloqué… », « Requête
+rejetée par le pare-feu applicatif »), page HTML équivalente sur l'interface ; 429 au-delà des limites.
+En-têtes transmis : `X-Forwarded-For` **remplacé** par l'IP vue par le WAF, `X-Forwarded-Proto`, `Host` avec le
+port. Journal d'accès JSON (`client_ip`, `peer`, `scheme`, `method`, `uri`, `status`, `request_time`,
+`user_agent`…) et journal d'audit ModSecurity (JSON) sur la sortie standard : Loki `{service="waf"}`.
+
+### 5.2 Passerelle (`gateway/nginx.conf`, conteneur `rsl-gateway`)
+
+Non publiée : on y entre par le WAF, ou depuis la pile (front, sonde). Elle croit `X-Forwarded-For` du seul WAF
+(`10.250.0.5`, module `realip`) : `$remote_addr` est l'IP réelle du client.
 
 | Chemin | Destination | Particularités |
 |---|---|---|
@@ -516,13 +552,16 @@ contrôle de santé du conteneur. Détails : `frontend/README.md`.
 | `/api/payments` | payments | |
 | `/api/notifications` | notifications | |
 | `/api/audit` | audit | Rôle admin vérifié par le service |
+| `/api/security` | detector | Liste des bans et blocages ML ; rôle admin vérifié par le détecteur |
+| `= /_waf/check` | detector | Contrôle demandé par le WAF pour chaque requête ; réservé au WAF, jamais journalisé |
 | `^~ /internal/` | — | **404** : jamais exposé (403 si le client est bloqué) |
 | `= /gateway-health` | — | 200 `ok` (santé du conteneur) |
 | `/` (reste) | — | 404 JSON (`/docs`, `/metrics`, `/ready` des services ne sont pas routés) ; 403 si le client est bloqué |
 
 **Contrôle du détecteur ML** : chaque emplacement ci-dessus (sauf `/gateway-health`) appelle d'abord
-`detector:8000/internal/check` (`auth_request`, délai 300 ms). 403 ⇒ réponse JSON « Accès temporairement
-bloqué : trafic anormal détecté ». Détecteur absent, arrêté ou lent ⇒ la requête passe (ouverture par défaut).
+`detector:8000/internal/check` (`auth_request`, délai 300 ms). 403 ⇒ réponse JSON « Adresse IP bannie » ou
+« Accès temporairement bloqué : trafic anormal détecté ». Détecteur absent, arrêté ou lent ⇒ la requête passe
+(ouverture par défaut ; attente DNS bornée à 500 ms quand le conteneur est arrêté).
 
 Réglages : résolution DNS dynamique (`resolver 127.0.0.11 valid=5s` + variable) pour retrouver un service
 redémarré sans recharger Nginx ; corps limité à 64 ko ; délais 2 s (connexion) / 10 s (lecture) ;

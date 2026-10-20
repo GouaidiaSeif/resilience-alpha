@@ -1,4 +1,4 @@
-"""Lecture du journal d'accès de la passerelle dans Loki.
+"""Lecture dans Loki du journal d'accès de la passerelle et du journal d'audit ModSecurity du WAF.
 
 Deux façons d'atteindre Loki (non publié sur l'hôte) :
   - depuis un conteneur du réseau backend : LOKI_URL=http://loki:3100
@@ -16,6 +16,7 @@ from collections.abc import Iterator
 import httpx
 
 QUERY = '{service="gateway"}'
+WAF_QUERY = '{service="waf"} |= `"transaction"`'   # journal d'audit ModSecurity (JSON, une transaction par ligne)
 PAGE = 5000  # limite par requête côté Loki
 
 
@@ -36,8 +37,8 @@ def parse_line(line: str) -> dict | None:
     return rec
 
 
-def fetch(start_s: float, end_s: float, client: httpx.Client | None = None) -> Iterator[dict]:
-    """Toutes les lignes d'accès entre start et end (secondes epoch), dans l'ordre chronologique, paginées."""
+def _lines(query: str, start_s: float, end_s: float, client: httpx.Client | None) -> Iterator[tuple[float, str]]:
+    """(horodatage, ligne) entre start et end (secondes epoch), dans l'ordre chronologique, paginés."""
     own = client is None
     c = client or _client()
     try:
@@ -46,22 +47,43 @@ def fetch(start_s: float, end_s: float, client: httpx.Client | None = None) -> I
         while cursor < end:
             r = c.get(
                 "/loki/api/v1/query_range",
-                params={"query": QUERY, "start": cursor, "end": end, "limit": PAGE, "direction": "forward"},
+                params={"query": query, "start": cursor, "end": end, "limit": PAGE, "direction": "forward"},
             )
             r.raise_for_status()
             values = [v for stream in r.json()["data"]["result"] for v in stream["values"]]
             values.sort(key=lambda v: int(v[0]))
             for ts_ns, line in values:
-                rec = parse_line(line)
-                if rec is not None:
-                    rec["_ts"] = int(ts_ns) / 1e9
-                    yield rec
+                yield int(ts_ns) / 1e9, line
             if len(values) < PAGE:
                 break
             cursor = int(values[-1][0]) + 1
     finally:
         if own:
             c.close()
+
+
+def fetch(start_s: float, end_s: float, client: httpx.Client | None = None) -> Iterator[dict]:
+    """Toutes les lignes d'accès de la passerelle entre start et end (secondes epoch)."""
+    for ts, line in _lines(QUERY, start_s, end_s, client):
+        rec = parse_line(line)
+        if rec is not None:
+            rec["_ts"] = ts
+            yield rec
+
+
+def waf_transactions(seconds: float, delay: float = 3.0, client: httpx.Client | None = None) -> list[dict]:
+    """Transactions ModSecurity récentes : {client_ip, interrupted, rules: [identifiants], uri}."""
+    now = time.time() - delay
+    out = []
+    for ts, line in _lines(WAF_QUERY, now - seconds, now, client):
+        try:
+            tx = json.loads(line)["transaction"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        rules = [str(m.get("details", {}).get("ruleId", "")) for m in tx.get("messages") or []]
+        out.append({"_ts": ts, "client_ip": tx.get("client_ip", ""), "interrupted": bool(tx.get("is_interrupted")),
+                    "rules": rules, "uri": str(tx.get("request", {}).get("uri", ""))[:200]})
+    return out
 
 
 def fetch_recent(seconds: float, delay: float = 3.0, client: httpx.Client | None = None) -> list[dict]:

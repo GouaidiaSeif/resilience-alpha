@@ -69,7 +69,7 @@ Update 2026-10-19 (same day, later session):
 
 Not done / outside repo:
 - Browser verification scripts (Playwright + axe) lived in the session scratchpad, not in the repo.
-- WAF not plugged in (spot reserved in `gateway/nginx.conf`). No TLS. Vault/SOPS, SIEM, Ansible, RAG are out of scope.
+- TLS cert is self-signed (lab). Vault/SOPS, SIEM, Ansible, RAG are out of scope.
 - No automated tests for the services themselves.
 
 ## Layout
@@ -191,3 +191,25 @@ Line endings: `.gitattributes` forces LF on sh/sql/yml/conf/py. CRLF on `01-role
   `versions` and data sha256; `ml/model_io.py` loads with a version check (detector logs
   `detector_model_version_mismatch`, evaluate.py prints a warning). `train.py --from-file ml/data/train.jsonl`
   reproduces the shipped model bit for bit (verified). `.gitattributes`: `*.jsonl eol=lf`, `*.joblib binary`.
+
+- 2026-10-20 (evening): WAF + real IP + ban list.
+  - `rsl-waf` (owasp/modsecurity-crs 4.25.2 LTS nginx-alpine, pinned) is the ONLY published entry: 8080/8443
+    (self-signed TLS), plus 127.0.0.1:18080/18443 PROXY-protocol ports for `scripts/edge_relay.py` (host relay,
+    stdlib) which restores the real client IP under Docker Desktop (`EDGE_RELAY=true`, `WAF_*_BIND=127.0.0.1:2808x`
+    in .env). Gateway no longer published; trusts X-Forwarded-For from WAF 10.250.0.5 only. Front only on
+    127.0.0.1:3001; users go https://<host>:8443. Verified: 192.168.1.49 seen at WAF, gateway, auth.
+  - WAF config = templates in `waf/` mounted into /etc/nginx/templates (image runs envsubst; ModSecurity enabled
+    by the image's own conf.d/modsecurity.conf). WAF checks bans+ML for EVERY request (auth_request ->
+    gateway `/_waf/check`, WAF-only, not logged), routes only known front pages to the front, everything else
+    to the gateway (so ML sees scans). New front pages must be added to `waf_routes.conf.template`.
+  - CRS false positives fixed for front pages only: 920420 (text/plain), 922130 (Next `$ACTION_` fields) in
+    `exclusions-before-crs.conf` (mounted as REQUEST-900-...); 920350 removed globally; attack-rce rules skip ARGS:client on /api/security/blocks only. ALLOWED_METHODS adds DELETE.
+  - Ban list: `ml/bans.py` + detector, JSON on volume detector-data. Sources manual / waf (5 WAF blocks in 2 min,
+    1 h) / ml (ML block bans IP, 10 min). NEVER_BAN 127/8, ::1, 10.250.0.0/24. Admin API `/api/security/bans|blocks`,
+    front page `/admin/security`. Unban ignores older WAF hits (bug found and fixed).
+  - Grafana dashboard `ra-waf`, alerts 14 (new: WAF attack, IP banned; 429/404 rules now on WAF log).
+    `detector_checks_total` has `origin` label (waf|gateway). Gateway `resolver_timeout 500ms` (fail-open latency).
+  - Tests: UI flow through WAF 35/35, Sécurité page 11/11, 12 pytest, all 6 attacks blocked through the WAF.
+  - One-click: `demarrer.cmd` / `arreter.cmd` at repo root (Windows double-click). start.ps1 checks Docker and
+    Python 3.10+ first. Fresh-clone test (clean copy, new .env, project `rafresh`) passed after fixing: empty
+    DISCORD_WEBHOOK_URL made Grafana crash-loop (now defaults to a dead local URL). 35/35, 11/11, smoke OK.

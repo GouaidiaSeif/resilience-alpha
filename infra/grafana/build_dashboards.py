@@ -268,6 +268,7 @@ LINKS = [
     {"title": "Trafic et paiements", "type": "link", "url": "/d/ra-traffic", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
     {"title": "Journaux et sécurité", "type": "link", "url": "/d/ra-logs", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
     {"title": "Détection ML", "type": "link", "url": "/d/ra-detection", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
+    {"title": "WAF et bans", "type": "link", "url": "/d/ra-waf", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
     {"title": "Alertes", "type": "link", "url": "/alerting/list", "icon": "bolt", "keepTime": False, "targetBlank": False, "tooltip": "Règles d'alerte (livrées sur Discord)"},
 ]
 
@@ -537,8 +538,8 @@ p.append(stat("Clients bloqués maintenant", "detector_blocked_clients : clients
               thresholds={"mode": "absolute", "steps": [{"color": "text", "value": None}, {"color": CRIT, "value": 1}]}))
 p.append(stat("Blocages (période)", "increase(detector_blocks_total) sur la période affichée.",
               [target("sum(increase(detector_blocks_total[$__range]))", instant=True)], {"h": 4, "w": 4, "x": 12, "y": y}, decimals=0, no_value="0"))
-p.append(stat("Requêtes refusées (période)", "Contrôles de la passerelle répondus 403 par le détecteur sur la période.",
-              [target('sum(increase(detector_checks_total{result="blocked"}[$__range]))', instant=True)], {"h": 4, "w": 4, "x": 16, "y": y},
+p.append(stat("Requêtes refusées (période)", "Requêtes externes refusées par le détecteur sur la période (IP bannie ou client bloqué).",
+              [target('sum(increase(detector_checks_total{origin="waf", result=~"blocked|banned"}[$__range]))', instant=True)], {"h": 4, "w": 4, "x": 16, "y": y},
               decimals=0, no_value="0"))
 p.append(stat("Dernière évaluation", "time() - detector_last_evaluation_timestamp_seconds. Une évaluation toutes les 5 s.",
               [target("time() - max(detector_last_evaluation_timestamp_seconds)")], {"h": 4, "w": 4, "x": 20, "y": y}, unit="s", decimals=0,
@@ -547,10 +548,10 @@ y += 4
 
 p.append(text_row("Décisions", y)); y += 1
 p.append(timeseries("Contrôles de la passerelle par seconde, par décision",
-                    "Avant chaque requête, la passerelle interroge le détecteur (auth_request) : autorisée (204) ou refusée (403).",
-                    [target('sum by (result) (rate(detector_checks_total[$__rate_interval]))', "{{result}}")],
+                    "Avant chaque requête externe, le WAF interroge le détecteur (via la passerelle) : autorisée (204), IP bannie ou client bloqué (403).",
+                    [target('sum by (result) (rate(detector_checks_total{origin="waf"}[$__rate_interval]))', "{{result}}")],
                     {"h": 8, "w": 12, "x": 0, "y": y}, unit="reqps", decimals=2,
-                    overrides=fixed_overrides([("allowed", "Autorisées", NEUTRAL), ("blocked", "Refusées (client bloqué)", CRIT)])))
+                    overrides=fixed_overrides([("allowed", "Autorisées", NEUTRAL), ("blocked", "Refusées : client bloqué (ML)", CRIT), ("banned", "Refusées : IP bannie", "#d95926")])))
 p.append(timeseries("Fenêtres anormales par minute, par règle",
                     "Règle du modèle hybride qui a réagi. Une fenêtre peut déclencher plusieurs règles ; deux fenêtres anormales de suite = blocage.",
                     [target('sum by (reason) (rate(detector_anomaly_reasons_total[$__rate_interval])) * 60', "{{reason}}")],
@@ -598,6 +599,113 @@ detection = dashboard("ra-detection", "Resilience Alpha · Détection ML",
                       "Détecteur hybride (forêt d'isolement + bornes + classifieur supervisé) : état, décisions de la passerelle, scores du modèle, blocages.",
                       p, ["ml", "securite"], LINKS, annotations=DETECTOR_ANNOTATIONS, refresh="5s", time_from="now-30m")
 
-for name, d in [("recovery", recovery), ("traffic", traffic), ("logs", logs_db), ("detection", detection)]:
+# ───────────────────────────── 5. WAF et bans ─────────────────────────────
+_id = 0
+y = 0
+p = []
+WAF_TX = '{service="waf"} |= `"transaction"`'
+WAF_BLOCKED = '{service="waf"} |= `"is_interrupted":true`'
+WAF_ACCESS = '{service="waf"} |= `"source":"waf"` | json'
+# Libellés des règles fréquentes (OWASP CRS 4 + règles maison).
+RULES = {
+    "930130": "Accès à un fichier sensible", "930120": "Accès à un fichier système", "930110": "Traversée de chemin",
+    "942100": "Injection SQL (libinjection)", "942110": "Injection SQL", "942190": "Injection SQL (UNION)",
+    "941100": "XSS (libinjection)", "941110": "XSS (balise script)", "932100": "Injection de commande Unix",
+    "933100": "Injection PHP", "911100": "Méthode HTTP non autorisée", "920420": "Type de contenu non autorisé",
+    "913100": "Outil de scan connu", "9000001": "Outil de scan (règle maison)", "200002": "Corps de requête illisible",
+}
+BAN_SOURCES = [("manual", "Manuel", NEUTRAL), ("waf", "WAF", "#d95926"), ("ml", "Modèle ML", "#3987e5")]
+
+p.append(text_row("Maintenant", y)); y += 1
+p.append(stat("IP bannies", "detector_banned_ips : adresses dont toutes les requêtes reçoivent 403 (API et interface).",
+              [target("max(detector_banned_ips)")], {"h": 4, "w": 4, "x": 0, "y": y}, decimals=0,
+              thresholds={"mode": "absolute", "steps": [{"color": "text", "value": None}, {"color": CRIT, "value": 1}]}))
+p.append(stat("Bloquées par ModSecurity (période)", "Requêtes interrompues par le WAF (règles OWASP CRS et maison) sur la période.",
+              [target(f"sum(count_over_time({WAF_BLOCKED} [$__range]))", ds=LOKI, instant=True)], {"h": 4, "w": 4, "x": 4, "y": y},
+              decimals=0, no_value="0"))
+p.append(stat("Refusées par la liste des bans (période)", "Requêtes externes refusées parce que l'IP est bannie.",
+              [target('sum(increase(detector_checks_total{origin="waf", result="banned"}[$__range]))', instant=True)],
+              {"h": 4, "w": 4, "x": 8, "y": y}, decimals=0, no_value="0"))
+p.append(stat("Bans (période)", "increase(detector_bans_total) : nouveaux bans, toutes origines.",
+              [target("sum(increase(detector_bans_total[$__range]))", instant=True)], {"h": 4, "w": 4, "x": 12, "y": y},
+              decimals=0, no_value="0"))
+p.append(stat("Requêtes reçues (période)", "Toutes les requêtes passées par le WAF (journal d'accès).",
+              [target(f"sum(count_over_time({WAF_ACCESS} [$__range]))", ds=LOKI, instant=True)], {"h": 4, "w": 4, "x": 16, "y": y},
+              decimals=0, no_value="0"))
+p.append(stat("Part en HTTPS (période)", "Requêtes reçues en HTTPS / toutes les requêtes. Les pages sont toujours redirigées en HTTPS ; l'API reste joignable en HTTP.",
+              [target(f'sum(count_over_time({WAF_ACCESS} | scheme="https" [$__range])) / sum(count_over_time({WAF_ACCESS} [$__range]))', ds=LOKI, instant=True)],
+              {"h": 4, "w": 4, "x": 20, "y": y}, unit="percentunit", decimals=1))
+y += 4
+
+p.append(text_row("Décisions", y)); y += 1
+p.append(timeseries("Réponses du WAF par minute, par issue",
+                    "Journal d'accès du WAF : réponses normales, refus 403 (ModSecurity, bans, ML), limite de débit 429, autres erreurs.",
+                    [target(f'sum(count_over_time({WAF_ACCESS} | __error__="" | status < 400 [1m]))', "2xx/3xx", "A", ds=LOKI),
+                     target(f'sum(count_over_time({WAF_ACCESS} | __error__="" | status = 403 [1m]))', "403", "B", ds=LOKI),
+                     target(f'sum(count_over_time({WAF_ACCESS} | __error__="" | status = 429 [1m]))', "429", "C", ds=LOKI),
+                     target(f'sum(count_over_time({WAF_ACCESS} | __error__="" | status >= 400 | status != 403 | status != 429 [1m]))', "Autres 4xx/5xx", "D", ds=LOKI)],
+                    {"h": 8, "w": 12, "x": 0, "y": y}, unit="short",
+                    overrides=fixed_overrides([("2xx/3xx", "2xx/3xx", NEUTRAL), ("403", "Refusées (403)", CRIT),
+                                               ("429", "Limite de débit (429)", WARN), ("Autres 4xx/5xx", "Autres erreurs", "#9085e9")])))
+p.append(timeseries("Requêtes refusées par minute, par mécanisme",
+                    "ModSecurity (contenu malveillant), liste des bans (IP), modèle ML (comportement du client).",
+                    [target(f"sum(count_over_time({WAF_BLOCKED} [1m]))", "ModSecurity", "A", ds=LOKI),
+                     target('sum(rate(detector_checks_total{origin="waf", result="banned"}[$__rate_interval])) * 60', "IP bannie", "B"),
+                     target('sum(rate(detector_checks_total{origin="waf", result="blocked"}[$__rate_interval])) * 60', "Client bloqué (ML)", "C")],
+                    {"h": 8, "w": 12, "x": 12, "y": y}, unit="short", decimals=1,
+                    overrides=fixed_overrides([("ModSecurity", "ModSecurity", "#d95926"), ("IP bannie", "IP bannie", CRIT),
+                                               ("Client bloqué (ML)", "Client bloqué (ML)", "#3987e5")])))
+y += 8
+
+p.append(text_row("Attaquants et règles", y)); y += 1
+p.append(table("Adresses les plus bloquées par ModSecurity (période)",
+               "IP réelle du client (relais d'IP réelle actif) ; 10.250.0.1 = tous les clients extérieurs sans relais.",
+               [target(f'topk(10, sum by (client_ip) (count_over_time({WAF_TX} | json client_ip="transaction.client_ip", interrupted="transaction.is_interrupted" | interrupted="true" [$__range])))',
+                       ds=LOKI, instant=True)],
+               {"h": 9, "w": 8, "x": 0, "y": y}, rename={"client_ip": "Adresse IP", "Value #A": "Requêtes bloquées", "Value": "Requêtes bloquées"},
+               sort_by=[{"displayName": "Requêtes bloquées", "desc": True}]))
+p.append(table("Règles qui ont bloqué (période)",
+               "Première règle déclenchée par chaque requête bloquée (le score d'anomalie 949110 conclut toujours la liste).",
+               [target(f'topk(10, sum by (rule) (count_over_time({WAF_BLOCKED} | regexp `"ruleId":"(?P<rule>[0-9]+)"` [$__range])))',
+                       ds=LOKI, instant=True)],
+               {"h": 9, "w": 8, "x": 8, "y": y}, rename={"rule": "Règle", "Value #A": "Requêtes", "Value": "Requêtes"},
+               sort_by=[{"displayName": "Requêtes", "desc": True}],
+               overrides=[{"matcher": {"id": "byName", "options": "Règle"},
+                           "properties": [{"id": "mappings", "value": [{"type": "value", "options": {k: {"text": f"{k} · {v}"} for k, v in RULES.items()}}]}]}]))
+p.append(table("Clients les plus actifs (période)", "Requêtes par IP réelle et par protocole, toutes issues confondues.",
+               [target(f'topk(10, sum by (client_ip, scheme) (count_over_time({WAF_ACCESS} [$__range])))', ds=LOKI, instant=True)],
+               {"h": 9, "w": 8, "x": 16, "y": y},
+               rename={"client_ip": "Adresse IP", "scheme": "Protocole", "Value #A": "Requêtes", "Value": "Requêtes"},
+               sort_by=[{"displayName": "Requêtes", "desc": True}]))
+y += 9
+
+p.append(text_row("Bans", y)); y += 1
+p.append(timeseries("Nouveaux bans par heure, par origine",
+                    "detector_bans_total : manuel (page Sécurité du front), WAF (5 requêtes bloquées en 2 min), modèle ML.",
+                    [target("sum by (source) (increase(detector_bans_total[1h]))", "{{source}}")],
+                    {"h": 8, "w": 10, "x": 0, "y": y}, unit="short", decimals=0, bars=True, overrides=fixed_overrides(BAN_SOURCES)))
+p.append(logs("Bans et levées",
+              "detector_ip_banned / detector_ip_unbanned. Liste à jour et actions : front, Administration > Sécurité.",
+              '{service="detector"} | json | event=~"detector_ip_banned|detector_ip_unbanned" | line_format '
+              '`{{if eq .event "detector_ip_banned"}}BAN{{else}}LEVÉE{{end}} · {{.ip}}{{if .source}} · {{.source}}{{end}}{{if .reason}} · {{.reason}}{{end}}{{if .by}} · par {{.by}}{{end}}`',
+              {"h": 8, "w": 14, "x": 10, "y": y}))
+y += 8
+p.append(logs("Requêtes bloquées par ModSecurity",
+              "Adresse, requête et première règle déclenchée. Détail complet (toutes les règles, en-têtes) : Explore, {service=\"waf\"}.",
+              WAF_BLOCKED + ' | json ip="transaction.client_ip", method="transaction.request.method", uri="transaction.request.uri"'
+              ' | regexp `"ruleId":"(?P<rule>[0-9]+)"` | line_format "{{.ip}} · {{.method}} {{.uri}} · règle {{.rule}}"',
+              {"h": 10, "w": 24, "x": 0, "y": y}))
+y += 10
+
+BAN_ANNOTATIONS = [
+    {"name": "IP bannie", "datasource": LOKI, "enable": True, "iconColor": CRIT,
+     "expr": '{service="detector"} | json | event="detector_ip_banned"',
+     "textFormat": "{{ip}} bannie ({{source}}) : {{reason}}", "tagKeys": "", "titleFormat": "Ban"},
+]
+waf = dashboard("ra-waf", "Resilience Alpha · WAF et bans",
+                "Pare-feu applicatif (ModSecurity + OWASP CRS) : requêtes reçues et refusées, règles déclenchées, adresses attaquantes, liste des bans.",
+                p, ["waf", "securite"], LINKS, annotations=BAN_ANNOTATIONS, refresh="10s", time_from="now-1h")
+
+for name, d in [("recovery", recovery), ("traffic", traffic), ("logs", logs_db), ("detection", detection), ("waf", waf)]:
     (OUT / f"{name}.json").write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(OUT / f"{name}.json", len(d["panels"]), "panneaux")

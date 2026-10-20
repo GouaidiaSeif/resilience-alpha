@@ -6,14 +6,19 @@ passerelle (`/api/*`) et n'invente aucune fonctionnalité absente du backend.
 | Pour qui | Écrans |
 |---|---|
 | Client | Connexion, inscription, vue d'ensemble, comptes (liste, ouverture, détail), paiements (historique filtrable, nouveau paiement avec vérification, détail), notifications |
-| Administrateur | Les mêmes, plus **Supervision** (état des services en direct, incidents de remédiation) et **Journal d'audit** (filtres, vérification de la chaîne) |
+| Administrateur | Les mêmes, plus **Supervision** (état des services en direct, incidents de remédiation), **Journal d'audit** (filtres, vérification de la chaîne) et **Sécurité** (liste des bans : bannir, débannir ; clients bloqués par le modèle ML) |
 
 ## Démarrage
 
 Le front fait partie de la pile : `scripts/start.ps1` (ou `docker compose up -d --build` à la racine) construit
-l'image (`frontend/Dockerfile`, sortie Next.js « standalone ») et lance le conteneur `rsl-frontend` sur
-http://localhost:3001 (3000 est pris par Grafana). Dans Docker, il joint la passerelle par `http://gateway:8080`
-sur le réseau `web`, avec l'adresse fixe `10.250.0.10` que le détecteur ML ne bloque jamais.
+l'image (`frontend/Dockerfile`, sortie Next.js « standalone ») et lance le conteneur `rsl-frontend`. On y accède
+**par le WAF** : https://localhost:8443 (certificat autosigné), ou `https://<IP du PC Hôte>:8443` depuis un autre
+poste. Le port 3001 n'est publié qu'en local (http://127.0.0.1:3001, débogage sans WAF). Dans Docker, le front
+joint la passerelle par `http://gateway:8080` sur le réseau `web`, avec l'adresse fixe `10.250.0.10` que le
+détecteur ML ne bloque jamais.
+
+**Ajouter une page** : le WAF ne transmet au front que ses pages connues. Ajouter la route à la liste de
+`waf/includes/waf_routes.conf.template` (sinon elle répond « Page introuvable »), puis `docker compose restart waf`.
 
 Développement (rechargement à chaud), pile démarrée :
 
@@ -33,7 +38,7 @@ Compte administrateur : `admin` / `ADMIN_PASSWORD` du `.env` racine.
 ## Architecture
 
 ```
-Navigateur ──► Next.js (:3001) ──► passerelle Nginx (:8080) ──► services
+Navigateur ──► WAF (:8443) ──► Next.js (:3001) ──► passerelle Nginx (interne) ──► services
                · jeton JWT dans un cookie httpOnly (ra_session), jamais lisible par le JavaScript de la page
                · Server Components pour les lectures, Server Actions pour les écritures
                · /bff/health : vérification des services pour la page Supervision (admin)

@@ -1,8 +1,8 @@
 name: resilience-alpha
 
 # Réseaux :
-#   edge         seul réseau avec ports publiés (passerelle ; Grafana en local uniquement)
-#   web          front <-> passerelle uniquement ; adresse fixe du front (liste blanche du détecteur ML)
+#   edge         Grafana (local uniquement, joint Discord pour les alertes)
+#   web          WAF (seul point d'entrée publié) <-> passerelle et front ; adresses fixes du WAF et du front
 #   backend      interne (sans accès Internet) : services, Postgres, observabilité, détecteur ML
 #   remediation  interne : moteur de remédiation <-> proxy Docker restreint, rien d'autre
 #   obs          interne : Promtail <-> proxy Docker en lecture seule, rien d'autre
@@ -20,6 +20,7 @@ networks:
 
 volumes:
   pgdata: {}
+  detector-data: {}   # liste des bans du détecteur (survit aux redémarrages)
 
 x-hardening: &hardening
   read_only: true
@@ -65,16 +66,55 @@ services:
       timeout: 3s
       retries: 10
 
-  # ───────────────────────── passerelle (seul point d'entrée) ─────────────────────────
+  # ───────────────────────── WAF (seul point d'entrée publié) ─────────────────────────
+  # ModSecurity + OWASP CRS, TLS, IP réelle du client, limite par IP. Relaie /api/* à la passerelle et le reste
+  # au front. Ports : 8080 (HTTP) et 8443 (HTTPS) ; 18080/18443 en local pour le relais d'IP réelle
+  # (scripts/edge_relay.py, Docker Desktop). Voir docs/02, section 3.14.
+  waf:
+    image: owasp/modsecurity-crs:4.25.2-nginx-alpine-202610051210-lts
+    container_name: rsl-waf
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
+    restart: unless-stopped
+    environment:
+      MODSEC_RULE_ENGINE: ${WAF_RULE_ENGINE:-On}      # On = bloque ; DetectionOnly = journalise seulement
+      BLOCKING_PARANOIA: ${WAF_PARANOIA:-1}
+      ALLOWED_METHODS: GET HEAD POST OPTIONS DELETE     # CRS : DELETE refusé par défaut (utilisé par la liste des bans)
+      ACCESSLOG: /dev/null                           # remplacé par le journal JSON (waf/includes/waf_routes)
+      ERRORLOG: /dev/stderr
+    ports:
+      - "${WAF_HTTP_BIND:-0.0.0.0:8080}:8080"
+      - "${WAF_HTTPS_BIND:-0.0.0.0:8443}:8443"
+      - "127.0.0.1:18080:8081"                        # relais (PROXY protocol), joignable par l'hôte seulement
+      - "127.0.0.1:18443:8444"
+    volumes:
+      - ./waf/default.conf.template:/etc/nginx/templates/conf.d/default.conf.template:ro
+      - ./waf/includes/waf_routes.conf.template:/etc/nginx/templates/includes/waf_routes.conf.template:ro
+      - ./waf/includes/waf_tls.conf.template:/etc/nginx/templates/includes/waf_tls.conf.template:ro
+      - ./waf/includes/waf_proxy.conf.template:/etc/nginx/templates/includes/waf_proxy.conf.template:ro
+      - ./waf/exclusions-before-crs.conf:/etc/modsecurity.d/owasp-crs/rules/REQUEST-900-EXCLUSION-RULES-BEFORE-CRS.conf:ro
+      - ./waf/custom-rules.conf:/etc/modsecurity.d/owasp-crs/rules/custom-rules.conf:ro
+    depends_on: [gateway, frontend]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/waf-health || curl -fs http://127.0.0.1:8080/waf-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    networks:
+      web:
+        ipv4_address: 10.250.0.5
+
+  # ───────────────────────── passerelle (derrière le WAF) ─────────────────────────
   gateway:
     image: nginxinc/nginx-unprivileged:1.27-alpine
     container_name: rsl-gateway
     <<: *hardening
     restart: unless-stopped
-    ports: ["8080:8080"]
     volumes:
       - ./gateway/nginx.conf:/etc/nginx/conf.d/default.conf:ro   # contrôle auth_request vers le détecteur ML
-    networks: [edge, web, backend]
+    networks: [web, backend]          # plus de port publié : on n'y entre que par le WAF (ou depuis la pile)
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/gateway-health"]
       interval: 5s
@@ -204,8 +244,13 @@ services:
       MODEL_PATH: /app/model/model.joblib
       BLOCK_TTL_SECONDS: ${DETECTOR_BLOCK_TTL_SECONDS:-600}
       ALLOW_HOSTS: canary,10.250.0.10     # la sonde et le conteneur du front ne sont jamais bloqués
+      # Liste des bans : jamais d'adresse partagée (hôte Docker, WAF, front) ; bans automatiques WAF et ML.
+      NEVER_BAN: 127.0.0.0/8,::1/128,10.250.0.0/24
+      WAF_BAN_THRESHOLD: ${WAF_BAN_THRESHOLD:-5}           # requêtes bloquées par le WAF en 2 min avant ban
+      WAF_BAN_TTL_SECONDS: ${WAF_BAN_TTL_SECONDS:-3600}
     volumes:
       - ./ml/model:/app/model:ro
+      - detector-data:/data
     depends_on: [loki]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
@@ -226,7 +271,7 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_URL: http://gateway:8080
-    ports: ["3001:3001"]
+    ports: ["127.0.0.1:3001:3001"]     # accès direct local (débogage) ; le réseau passe par le WAF (https://…:8443)
     depends_on: [gateway]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/bff/ping').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -300,8 +345,9 @@ services:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?requis}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_ROOT_URL: http://localhost:3000          # liens « voir dans Grafana » des alertes Discord
-      # Alertes (infra/grafana/provisioning/alerting) livrées sur Discord. Vide = alertes visibles dans Grafana seulement.
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      # Alertes (infra/grafana/provisioning/alerting) livrées sur Discord. Sans URL dans .env, Grafana refuserait de
+      # démarrer (point de contact invalide) : adresse locale sans destinataire, les alertes restent dans Grafana.
+      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-http://127.0.0.1:9/discord-non-configure}
       TZ: ${TZ:-Europe/Paris}
     ports: ["127.0.0.1:3000:3000"]     # visible uniquement depuis le PC Hôte (jury)
     volumes:

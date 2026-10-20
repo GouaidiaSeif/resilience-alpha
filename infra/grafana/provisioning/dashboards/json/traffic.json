@@ -65,6 +65,15 @@
       "tooltip": ""
     },
     {
+      "title": "WAF et bans",
+      "type": "link",
+      "url": "/d/ra-waf",
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "tooltip": ""
+    },
+    {
       "title": "Alertes",
       "type": "link",
       "url": "/alerting/list",

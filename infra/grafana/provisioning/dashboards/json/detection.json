@@ -66,6 +66,15 @@
       "tooltip": ""
     },
     {
+      "title": "WAF et bans",
+      "type": "link",
+      "url": "/d/ra-waf",
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "tooltip": ""
+    },
+    {
       "title": "Alertes",
       "type": "link",
       "url": "/alerting/list",
@@ -421,7 +430,7 @@
       "type": "stat",
       "id": 6,
       "title": "Requêtes refusées (période)",
-      "description": "Contrôles de la passerelle répondus 403 par le détecteur sur la période.",
+      "description": "Requêtes externes refusées par le détecteur sur la période (IP bannie ou client bloqué).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -439,7 +448,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum(increase(detector_checks_total{result=\"blocked\"}[$__range]))",
+          "expr": "sum(increase(detector_checks_total{origin=\"waf\", result=~\"blocked|banned\"}[$__range]))",
           "legendFormat": "__auto",
           "range": false,
           "instant": true
@@ -574,7 +583,7 @@
       "type": "timeseries",
       "id": 9,
       "title": "Contrôles de la passerelle par seconde, par décision",
-      "description": "Avant chaque requête, la passerelle interroge le détecteur (auth_request) : autorisée (204) ou refusée (403).",
+      "description": "Avant chaque requête externe, le WAF interroge le détecteur (via la passerelle) : autorisée (204), IP bannie ou client bloqué (403).",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -592,7 +601,7 @@
             "uid": "prometheus"
           },
           "refId": "A",
-          "expr": "sum by (result) (rate(detector_checks_total[$__rate_interval]))",
+          "expr": "sum by (result) (rate(detector_checks_total{origin=\"waf\"}[$__rate_interval]))",
           "legendFormat": "{{result}}",
           "range": true,
           "instant": false
@@ -655,13 +664,32 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "Refusées (client bloqué)"
+                "value": "Refusées : client bloqué (ML)"
               },
               {
                 "id": "color",
                 "value": {
                   "mode": "fixed",
                   "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "banned"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Refusées : IP bannie"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d95926"
                 }
               }
             ]

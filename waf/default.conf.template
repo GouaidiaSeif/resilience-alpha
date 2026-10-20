@@ -1,0 +1,37 @@
+# WAF (ModSecurity + OWASP CRS, image owasp/modsecurity-crs) : SEUL point d'entrée publié.
+#   Client ──HTTP/HTTPS──► waf ──► gateway (routage /api, détecteur ML, liste des bans) ──► services
+#                              └─► frontend (pages de l'interface)
+#
+# Modèle traité par l'image au démarrage (envsubst) : seules les variables d'environnement DÉFINIES sont
+# remplacées, les variables nginx ($remote_addr…) restent intactes. ModSecurity est activé à part
+# (conf.d/modsecurity.conf de l'image) ; les règles maison sont dans waf/custom-rules.conf.
+
+# Journal d'accès JSON (Loki {service="waf"}) : IP réelle du client, protocole (http/https), décision.
+log_format waf_json escape=json
+  '{"time":"$time_iso8601","source":"waf","client_ip":"$remote_addr","peer":"$realip_remote_addr",'
+  '"scheme":"$scheme","method":"$request_method","host":"$http_host","uri":"$request_uri","status":$status,'
+  '"request_time":$request_time,"bytes_sent":$body_bytes_sent,"user_agent":"$http_user_agent",'
+  '"request_id":"$request_id"}';
+
+# Limite par IP réelle (déni de service applicatif) : 20 req/s, rafale de 10 (paiements : rafale de 5).
+limit_req_zone $binary_remote_addr zone=waf_per_ip:10m rate=20r/s;
+limit_req_status 429;
+
+# 1. Accès direct (Linux : IP réelle ; Docker Desktop : tous les clients extérieurs ont la même adresse).
+server {
+    listen 8080 default_server;
+    listen 8443 ssl;
+    include includes/waf_tls.conf;
+    include includes/waf_routes.conf;
+}
+
+# 2. Accès par le relais de l'hôte (scripts/edge_relay.py, PROXY protocol) : IP réelle sous Docker Desktop.
+#    Ports publiés sur 127.0.0.1 seulement ; seule l'adresse de l'hôte vue par Docker (10.250.0.1) est crue.
+server {
+    listen 8081 proxy_protocol;
+    listen 8444 ssl proxy_protocol;
+    set_real_ip_from 10.250.0.1;
+    real_ip_header proxy_protocol;
+    include includes/waf_tls.conf;
+    include includes/waf_routes.conf;
+}

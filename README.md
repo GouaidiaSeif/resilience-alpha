@@ -35,26 +35,35 @@ Les sections 9 (front) et 10 (observabilité) sont écrites pour ceux qui ne tou
 |---|---|
 | 7 services Python (auth, accounts, payments, notifications, audit, remediation, canary) | Écrits |
 | `docker-compose.yml`, réseaux cloisonnés, durcissement des conteneurs | Écrits, syntaxe validée (`docker compose config`) |
-| Passerelle Nginx (routage, limitation de débit, en-têtes de sécurité) | Écrite, **WAF à brancher** |
-| Prometheus, Loki, Promtail, Grafana | Câblés ; 4 dashboards et 12 règles d'alerte provisionnés, alertes livrées sur Discord (sections 10.6 et 10.8) |
-| Tests unitaires de la bibliothèque commune | 8 tests, passent |
+| WAF (ModSecurity + OWASP CRS 4.25 LTS) devant la passerelle : TLS, IP réelle, limite par IP, liste des bans | En place, testé le 2026-10-20 : injections et scanners bloqués, parcours complet du front sans faux positif (section 12, docs/02 §3.14) |
+| Passerelle Nginx (routage, limitation de débit, en-têtes de sécurité, contrôle du détecteur ML) | Écrite, derrière le WAF |
+| Prometheus, Loki, Promtail, Grafana | Câblés ; 5 dashboards et 14 règles d'alerte provisionnés, alertes livrées sur Discord (sections 10.6 et 10.8) |
+| Tests unitaires (bibliothèque commune, liste des bans) | 12 tests, passent |
 | Parcours de bout en bout (`scripts/smoke.py`) | Exécuté sur une pile Docker réelle le 2026-10-19 : OK |
 | Remédiation autonome (panne → redémarrage → preuve) | Vérifiée sur pile réelle le 2026-10-19 après deux correctifs (`events.py`, proxy Docker) |
 | Front Next.js/Tailwind | Écrit : `frontend/`, conteneur `rsl-frontend` lancé avec la pile (voir `frontend/README.md`) |
 | API de supervision pour le tableau de bord | Non nécessaire pour le front : état des services via la passerelle, incidents via l'audit (voir `frontend/README.md`) |
 | Service de détection ML (`detector`) | Lancé avec la pile : `ml/` (modèle hybride Isolation Forest + bornes + classifieur supervisé, blocage à la passerelle), testé de bout en bout le 2026-10-20. Modèle entraîné et données d'entraînement publiés (`ml/model/`, `ml/data/train.jsonl`) : rien à entraîner pour lancer la pile. Voir `docs/02-reprise-idempotence-ml.md` §3 |
-| Assistant RAG (Ollama/LangChain), WAF, SIEM, Vault/SOPS, Ansible | Hors de ce dépôt backend |
+| Assistant RAG (Ollama/LangChain), SIEM, Vault/SOPS, Ansible | Hors de ce dépôt backend |
 
 Les durées indiquées dans ce document (délais de détection, de reprise) sont déduites du code et des valeurs
 par défaut. Elles n'ont pas été mesurées sur une pile en fonctionnement.
 
 ## 2. Démarrage rapide
 
-Prérequis : Docker Desktop (WSL2), Python 3.10+ pour les scripts.
+Prérequis : **Docker Desktop** (WSL2) et **Python 3.10+** (cocher « Add python.exe to PATH » à l'installation).
+Rien d'autre : pas de Node.js, pas de venv, pas de base à installer.
+
+**Windows : double-cliquer `demarrer.cmd`** (à la racine du dépôt cloné). Pour arrêter : `arreter.cmd`.
+Équivalents en ligne de commande :
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start.ps1   # Windows : tout lancer (Linux/macOS : ./scripts/start.sh)
+powershell -ExecutionPolicy Bypass -File scripts/start.ps1   # Windows (Linux/macOS : ./scripts/start.sh)
 ```
+
+Premier lancement sur un poste : 5 à 10 min (construction des images), puis moins d'une minute. Le pare-feu
+Windows demande d'autoriser `python` (relais d'IP réelle) : accepter sur les réseaux privés. Pour recevoir les
+alertes sur Discord, renseigner `DISCORD_WEBHOOK_URL` dans le `.env` généré (facultatif).
 
 Le script démarre Docker Desktop s'il est arrêté, crée `.env` s'il manque, signale un webhook Discord ou un
 modèle ML absents, construit et lance toute la pile (services, passerelle, détecteur ML, front, observabilité),
@@ -70,8 +79,10 @@ python scripts/smoke.py                    # parcours complet : doit finir par "
 
 | Accès | Adresse | Remarque |
 |---|---|---|
-| Front | `http://localhost:3001` | Conteneur `rsl-frontend`. Compte `admin` / `ADMIN_PASSWORD` |
-| API (passerelle) | `http://localhost:8080` | Point d'entrée de l'API, exposé au réseau 192.168.137.0/24 |
+| Application (front) | `https://localhost:8443` | Par le WAF ; certificat autosigné (accepter l'avertissement). Compte `admin` / `ADMIN_PASSWORD`. Depuis un autre poste : `https://192.168.137.1:8443` |
+| API | `https://localhost:8443/api/…` ou `http://localhost:8080/api/…` | Par le WAF (seul composant publié), puis la passerelle |
+| Sécurité (liste des bans) | `https://localhost:8443/admin/security` | Rôle admin : bannir, débannir, clients bloqués par le ML |
+| Front en direct | `http://127.0.0.1:3001` | Local uniquement, pour le débogage (sans WAF) |
 | Grafana | `http://localhost:3000` | Local au PC Hôte. Utilisateur `admin`, mot de passe `GRAFANA_ADMIN_PASSWORD` |
 | PostgreSQL (DBeaver) | `localhost:5432` | **Optionnel**, voir ci-dessous |
 | Prometheus, Loki, services | non publiés | Joignables uniquement depuis les conteneurs |
@@ -92,9 +103,13 @@ Arrêt : `docker compose down`. Remise à zéro complète (efface la base) : `do
 ```
    PC Attaquant                  PC Hôte (Docker Desktop, 192.168.137.1)
    192.168.137.x
-        │ :8080                  ┌───────────────────────────────────────────────────────────────────┐
-        ▼                        │  réseau "edge"          réseau "backend" (interne, sans Internet)  │
-  ┌───────────┐ (WAF à brancher) │                                                                   │
+        │ :8443 (HTTPS) / :8080   relais d'IP réelle (scripts/edge_relay.py, PROXY protocol)
+        ▼
+  ┌───────────┐  ModSecurity + OWASP CRS, TLS, limite par IP, contrôle bans + ML ──► frontend (pages)
+  │    waf    │
+  └─────┬─────┘                  ┌───────────────────────────────────────────────────────────────────┐
+        ▼  /api/* et le reste    │  réseau "web"           réseau "backend" (interne, sans Internet)  │
+  ┌───────────┐ ◄─ détecteur ML  │                                                                   │
   │  gateway  │──────────────────┼─► auth ───────────┐                                               │
   │  (Nginx)  │──────────────────┼─► accounts ◄──────┤ chaque service lit/écrit SON schéma           │
   └───────────┘──────────────────┼─► payments ──► accounts   (transfert, idempotent par tx_id)      │
@@ -111,8 +126,8 @@ Arrêt : `docker compose down`. Remise à zéro complète (efface la base) : `do
 
 | Réseau | Interne ? | Contenu | Rôle |
 |---|---|---|---|
-| `edge` | non | gateway, grafana | Publient un port ; Grafana y joint Discord pour les alertes |
-| `web` | non | frontend (adresse fixe `10.250.0.10`), gateway | Le front ne voit que la passerelle ; son adresse fixe est exemptée par le détecteur ML |
+| `edge` | non | grafana | Publie Grafana en local ; Grafana y joint Discord pour les alertes |
+| `web` | non | waf (`10.250.0.5`), frontend (`10.250.0.10`), gateway | Le WAF publie 8080/8443 ; le front ne voit que la passerelle ; adresses fixes (confiance realip, exemptions du détecteur) |
 | `backend` | **oui** | tous les services, detector, postgres, prometheus, loki, promtail | Pas d'accès Internet, pas de port publié |
 | `remediation` | **oui** | remediation, docker-proxy-remediation | Isole le seul composant qui touche à Docker |
 | `obs` | **oui** | promtail, docker-proxy-ro | Lecture des conteneurs par Promtail |
@@ -122,8 +137,9 @@ compose séparé qui ajoute un réseau dédié.
 
 **Principes de conception à connaître**
 
-- **Un seul point d'entrée** : tout le trafic externe passe par la passerelle. Les routes `/internal/*`, `/metrics`,
-  `/ready` et `/docs` n'y sont volontairement pas routées (404).
+- **Un seul point d'entrée** : tout le trafic externe passe par le WAF, qui contrôle chaque requête (règles OWASP
+  CRS, liste des bans, blocages du ML) avant de la confier à la passerelle (`/api/*`) ou au front (ses pages). Les
+  routes `/internal/*`, `/metrics`, `/ready` et `/docs` ne sont volontairement pas routées (404).
 - **Moindre privilège** : un rôle PostgreSQL et un schéma par service ; aucun service n'exécute de DDL ; les
   appels entre services sont authentifiés par un jeton de service qui nomme l'appelant.
 - **Preuve de reprise** : un conteneur qui redémarre ne prouve rien. La reprise est validée par (1) `/ready` du
@@ -147,6 +163,7 @@ resilience-alpha/
 ├── .gitignore / .dockerignore     # .env exclu de Git et des images
 ├── .gitattributes                 # force LF sur .sh/.sql/.yml/.conf (évite "bad interpreter" sous Windows)
 │
+├── waf/                           # WAF : modèles nginx (routes, TLS, en-têtes), règles maison et exclusions ModSecurity
 ├── gateway/
 │   └── nginx.conf                 # routage /api/*, contrôle du détecteur ML, limitation de débit du login, logs JSON
 ├── db/init/
@@ -178,14 +195,14 @@ resilience-alpha/
 │   ├── prometheus/prometheus.yml  # cibles scrapées toutes les 5 s
 │   ├── promtail/promtail.yml      # collecte des logs des conteneurs vers Loki
 │   └── grafana/
-│       ├── build_dashboards.py    # génère les 4 dashboards (provisioning/dashboards/json)
-│       ├── build_alerts.py        # génère les 12 règles d'alerte (provisioning/alerting/rules.json)
+│       ├── build_dashboards.py    # génère les 5 dashboards (provisioning/dashboards/json)
+│       ├── build_alerts.py        # génère les 14 règles d'alerte (provisioning/alerting/rules.json)
 │       └── provisioning/          # sources de données, dashboards, alertes + point de contact Discord
 │
 ├── ml/                            # détection ML : entraînement, évaluation, service detector (voir ml/README.md)
 ├── frontend/                      # front Next.js (BFF), image Docker frontend/Dockerfile
 ├── scripts/                       # voir section 5
-├── tests/                         # tests pytest de la bibliothèque commune
+├── tests/                         # tests pytest : bibliothèque commune, liste des bans
 └── docs/api/*.openapi.json        # spécification OpenAPI de chaque service (générée)
 ```
 
@@ -193,7 +210,9 @@ resilience-alpha/
 
 | Fichier | Rôle | Quand l'utiliser |
 |---|---|---|
-| `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images, attend les contrôles de santé, affiche les adresses. | À chaque démarrage. Arrêt : `docker compose down`. |
+| `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images (sans Internet : démarre avec les images existantes), lance le relais d'IP réelle si `EDGE_RELAY=true`, attend les contrôles de santé, affiche les adresses (y compris celles du réseau local). | À chaque démarrage. |
+| `scripts/stop.ps1`, `scripts/stop.sh` | Arrête le relais d'IP réelle puis la pile (`docker compose down`). Base et liste des bans conservées. | En fin de séance. Remise à zéro : `docker compose down -v`. |
+| `scripts/edge_relay.py` | Relais TCP sur le PC Hôte : écoute 8080/8443 sur le réseau et transmet l'IP réelle au WAF (PROXY protocol). Le TLS reste terminé par le WAF. Bibliothèque standard uniquement. | Lancé par `start.ps1`/`start.sh` sous Docker Desktop (`EDGE_RELAY=true`). Inutile sous Linux. |
 | `scripts/gen_env.py` | Crée `.env` depuis `.env.example` en remplaçant chaque `CHANGE_ME` par un secret aléatoire. Stdlib uniquement : pas de venv nécessaire. Refuse d'écraser un `.env` existant sans `--force`. | Une fois, avant le premier `docker compose up`. Après `--force`, faire aussi `docker compose down -v` : les mots de passe de la base changent. |
 | `scripts/smoke.py` | Parcours de bout en bout via la passerelle : inscription, mauvais mot de passe, connexion, API protégée, 2 comptes, paiement, rejeu idempotent, soldes, solde insuffisant, plafond, notification, intégrité de l'audit. Quitte avec un code ≠ 0 au premier échec. Nécessite `httpx`. | Après chaque démarrage, et juste avant la démo. `ADMIN_PASSWORD=... python scripts/smoke.py` ajoute la vérification de la chaîne d'audit. `BASE_URL=http://192.168.137.1:8080` pour le lancer depuis un autre poste. |
 | `scripts/export_openapi.py` | Génère `docs/api/<service>.openapi.json` en important chaque application. Nécessite `pip install -r requirements-dev.txt`. | Après toute modification d'un endpoint. Livrable « documentation d'API ». |
@@ -222,6 +241,10 @@ Cible industrielle : migrer vers Vault ou SOPS.
 | `DISCORD_WEBHOOK_URL` | vide | Webhook du salon Discord qui reçoit les alertes Grafana (secret). Vide = alertes dans Grafana seulement |
 | `TZ` | `Europe/Paris` | Fuseau des heures affichées dans les messages d'alerte |
 | `DETECTOR_BLOCK_TTL_SECONDS` | `600` | Durée d'un blocage par le détecteur ML |
+| `EDGE_RELAY` | `true` | Lance le relais d'IP réelle (Docker Desktop). Sous Linux : `false` et supprimer les deux lignes suivantes |
+| `WAF_HTTP_BIND`, `WAF_HTTPS_BIND` | `127.0.0.1:28080`, `127.0.0.1:28443` | Ports directs du WAF, laissés en local quand le relais prend 8080/8443. Sans relais : `0.0.0.0:8080`, `0.0.0.0:8443` (valeur par défaut si absents) |
+| `WAF_RULE_ENGINE` | `On` | `On` bloque ; `DetectionOnly` journalise seulement (pour valider une nouvelle règle) |
+| `WAF_BAN_THRESHOLD`, `WAF_BAN_TTL_SECONDS` | `5`, `3600` | Ban automatique : requêtes bloquées par le WAF en 2 min, durée du ban |
 
 Réglages avancés (variables d'environnement des conteneurs, non listées dans `.env.example`, à ajouter à la
 section `environment` du service concerné dans le compose) :
@@ -707,7 +730,7 @@ conteneurs ──stdout JSON──► Promtail ──► Loki ──► Grafana 
 - Les datasources sont **provisionnées** (`infra/grafana/provisioning/datasources/datasources.yml`) : rien à
   configurer à la main.
 - Les datasources ont des uid fixes (`prometheus`, `loki`) référencés par les dashboards : ne pas les renommer.
-- **Quatre dashboards sont provisionnés** dans le dossier Grafana « Resilience Alpha » (détail en 10.6). Leur JSON est
+- **Cinq dashboards sont provisionnés** dans le dossier Grafana « Resilience Alpha » (détail en 10.6). Leur JSON est
   dans `infra/grafana/provisioning/dashboards/json/`, généré par `python infra/grafana/build_dashboards.py`
   (couleurs, libellés et requêtes au même endroit). Grafana recharge les fichiers toutes les 30 s.
 - Les modifications faites dans l'interface ne sont **pas** écrites sur le disque et une régénération les écraserait :
@@ -813,14 +836,15 @@ Les services journalisent aussi `http_request` avec `client_ip`, `path`, `status
 
 ### 10.6 Dashboard « avant / pendant / après » (critère de jury, axe 3)
 
-Le jury doit voir l'état du service avant l'incident, pendant et après la remédiation. Quatre dashboards provisionnés,
+Le jury doit voir l'état du service avant l'incident, pendant et après la remédiation. Cinq dashboards provisionnés,
 reliés entre eux par des liens en haut de page :
 
 | Dashboard (uid) | Pour qui | Contenu |
 |---|---|---|
 | **Reprise autonome** (`/d/ra-recovery`) | Jury, démo | Tuiles « maintenant » (paiement de contrôle, temps sans succès, cohérence des données, incidents actifs, reprises prouvées, durée de reprise p95) ; frise d'état par service vue par la sonde (`canary_service_ready`, `canary_up`) et par Prometheus (`up`) ; durée et résultat des sondes ; incidents par service et issue ; déroulé des reprises (Loki). Actualisation 5 s, fenêtre 15 min |
 | **Trafic et paiements** (`/d/ra-traffic`) | Équipe infra | Débit, part de 5xx, latence p95, 4xx/5xx par service (hors `/ready`, `/health`, `/metrics`) ; paiements et notifications par minute ; routes les plus sollicitées |
-| **Détection ML** (`/d/ra-detection`) | Cyber, démo d'attaque | État du détecteur et du modèle ; clients bloqués ; décisions de la passerelle (autorisées / refusées) ; fenêtres anormales par règle (forêt, bornes, supervisé) ; score le plus anormal face au seuil ; probabilité d'attaque ; journal des blocages et des anomalies |
+| **WAF et bans** (`/d/ra-waf`) | Cyber, démo d'attaque | IP bannies, requêtes bloquées par ModSecurity, refus par la liste des bans et par le ML ; réponses du WAF par issue ; adresses les plus bloquées, règles déclenchées (avec libellé), clients les plus actifs par protocole ; bans par origine ; journal des bans et des requêtes bloquées |
+| **Détection ML** (`/d/ra-detection`) | Cyber, démo d'attaque | État du détecteur et du modèle ; clients bloqués ; décisions sur les requêtes externes (autorisées / IP bannie / client bloqué) ; fenêtres anormales par règle (forêt, bornes, supervisé) ; score le plus anormal face au seuil ; probabilité d'attaque ; journal des blocages et des anomalies |
 | **Journaux et sécurité** (`/d/ra-logs`) | Cyber, SIEM | Volume de logs par niveau ; avertissements par service ; connexions réussies / échouées / bloquées et top des IP en échec ; réponses de la passerelle par classe ; trafic hors sonde ; erreurs critiques ; exploration par service et texte ; **suivi d'une requête** par `request_id` (variable en haut) |
 
 **Annotations** (lignes verticales sur les graphiques) : alerte de la sonde, remédiation lancée, reprise prouvée.
@@ -845,8 +869,8 @@ produit dans la page Supervision du front.
 
 ### 10.8 Alertes (livrées sur Discord)
 
-Douze règles Grafana provisionnées, évaluées toutes les 10 s : attaque bloquée par le ML, force brute, limitation
-de débit (429), balayage (404), piste d'audit altérée, soldes incohérents, détecteur arrêté ou sans modèle,
+Quatorze règles Grafana provisionnées, évaluées toutes les 10 s : attaque bloquée par le ML, attaque bloquée par le
+WAF, adresse IP bannie (WAF ou administrateur), force brute, limitation de débit (429), balayage (404), piste d'audit altérée, soldes incohérents, détecteur arrêté ou sans modèle,
 service indisponible, paiement de contrôle en échec, remédiation en échec, taux de 5xx. Détail, seuils et
 configuration du webhook : `docs/02-reprise-idempotence-ml.md` §3.13. Liste et état dans Grafana : Alertes >
 Règles d'alerte (`/alerting/list`). Modifier une règle : `infra/grafana/build_alerts.py`, puis
@@ -895,9 +919,11 @@ documenter dans le PCA/PRA.
 | Révocation | Jetons de 15 min, sans refresh ni révocation | Liste de révocation ou sessions côté serveur |
 | Anti-force brute | Nginx + compteurs en mémoire du service auth | Compteurs perdus au redémarrage ; en multi-réplicas, utiliser Redis |
 | Accès Docker | Proxy `tecnativa/docker-socket-proxy` limité à stop/restart/kill (`POST=1`, `ALLOW_RESTARTS=1`, `CONTAINERS=0` : ni inspection ni création) ; liste blanche de 4 conteneurs **dans le code du moteur** | Le proxy autorise stop/restart/kill de **n'importe quel** conteneur ; épingler l'image (actuellement `latest`) |
-| Exposition | Seule la passerelle (`0.0.0.0:8080`) et Grafana (`127.0.0.1:3000`) | Pas de TLS (HTTP en laboratoire) ; **WAF non branché** |
+| Exposition | Seul le WAF (8080 HTTP, 8443 HTTPS, via le relais) et Grafana (`127.0.0.1:3000`) ; la base n'est jamais publiée | Certificat autosigné (laboratoire) ; l'API reste joignable en HTTP (les pages sont redirigées en HTTPS) |
+| WAF | ModSecurity + OWASP CRS 4.25 LTS, paranoïa 1, mode `On` ; règles maison (outils de scan, seuil abaissé sur `/api/payments`) ; 3 exclusions documentées pour le front (`waf/`) | Paranoïa 1 = peu de faux positifs mais détection moins fine ; toute nouvelle page du front doit être ajoutée aux routes du WAF |
+| Liste des bans | IP bannies (manuel, WAF, ML), persistantes, appliquées par le WAF à chaque requête (interface comprise), tracées dans l'audit ; adresses partagées jamais bannies | Liste locale au détecteur (un seul réplica) ; cible : partagée via Redis, ou poussée au pare-feu de l'hôte |
 | Prometheus, Loki | Sans authentification, non publiés | Ne jamais publier sans authentification |
-| Adresse IP client | `X-Real-IP` posé par la passerelle, approuvé car les services ne sont joignables que par elle | **Sous Docker Desktop (Windows), la passerelle ne voit jamais l'IP réelle** : tous les clients extérieurs arrivent en `172.21.0.1` (vérifié le 2026-10-19). La limite de connexion Nginx et l'anti-force brute « par IP » d'auth sont donc **communs à tous les clients** : une attaque bloque aussi les utilisateurs légitimes. Correctifs : proxy sur l'hôte qui transmet l'IP (`X-Forwarded-For` + module `realip`), ou pile sur un hôte Linux. Voir `docs/02-reprise-idempotence-ml.md` §3.1 |
+| Adresse IP client | Docker Desktop masque l'adresse source ; le relais de l'hôte la transmet au WAF (PROXY protocol), qui la passe à la passerelle (`X-Forwarded-For`, remplacé et non complété) ; chaque maillon ne croit que l'adresse fixe du précédent. Vérifié le 2026-10-20 : un client `192.168.1.49` est vu tel quel par le WAF, la passerelle et auth | Sans relais (`EDGE_RELAY=false` sous Docker Desktop), tous les clients extérieurs ont la même adresse (`10.250.0.1`) : ni ban d'IP, ni anti-force brute par IP distinctifs. Voir `docs/02-reprise-idempotence-ml.md` §3.1 |
 | Données | Un rôle et un schéma par service, ledger sans UPDATE/DELETE, `balance >= 0` en base | Le compte `pgadmin` (superuser) existe : ne pas l'exposer |
 | Secrets | `.env` généré aléatoirement, ignoré par Git | Migrer vers Vault ou SOPS ; ne jamais livrer `.env` dans l'archive |
 | Solde de démonstration | `initial_balance` permet un crédit fictif libre à l'ouverture | **Démo uniquement** : à supprimer en production |
@@ -907,7 +933,7 @@ documenter dans le PCA/PRA.
 ## 13. Tests, conventions, dépannage
 
 **Tests** : `pip install -r requirements-dev.txt` puis `PYTHONPATH=libs/common pytest tests` (PowerShell :
-`$env:PYTHONPATH="libs/common"; pytest tests`). Les 8 tests couvrent la bibliothèque commune ; il n'y a pas de test
+`$env:PYTHONPATH="libs/common"; pytest tests`). Les 12 tests couvrent la bibliothèque commune et la liste des bans ; il n'y a pas de test
 automatisé des services. `scripts/smoke.py` fait office de test d'intégration manuel.
 
 **Conventions** : événements de log et actions d'audit en `snake_case` ; un nom d'événement = un sens stable (ils
@@ -930,6 +956,9 @@ Python 3.12 ; aucun secret dans le code, uniquement par variables d'environnemen
 | Un service arrêté ne revient pas | Voulu (`restart: "no"`) : la remédiation doit le relancer ; voir ses logs et la section 11 |
 | DBeaver : connexion refusée | Lancer avec `-f docker-compose.dbeaver.yml` (section 2) |
 | Port 8080 ou 3000 déjà pris | Un autre programme l'occupe : le libérer ou changer le port côté gauche du mapping |
+| `https://…:8443` injoignable depuis un autre poste | Relais d'IP réelle arrêté (voir `.run/edge_relay.err.log`) ou bloqué par le pare-feu Windows : autoriser `python` sur les réseaux privés |
+| Une page du front répond « Page introuvable » | Route absente de la liste des pages du WAF (`waf/includes/waf_routes.conf.template`) : l'ajouter puis `docker compose restart waf` |
+| 403 « Requête rejetée par le pare-feu applicatif » sur une action légitime | Faux positif du CRS : identifier la règle dans Grafana « WAF et bans » puis ajouter une exclusion ciblée (`waf/exclusions-before-crs.conf`) |
 
 Livrables du sujet à tenir à jour avec ce dépôt : `Workshop2026-M2-G<n>-Code.zip` (sources, configurations, scripts
 d'attaque et de ML, tests, documentation d'API, README) **sans aucun secret**, soit sans `.env`.

@@ -144,8 +144,8 @@
           "isPaused": false
         },
         {
-          "uid": "ra-rate-limited",
-          "title": "Limitation de débit déclenchée à la passerelle",
+          "uid": "ra-waf-attack",
+          "title": "Attaque bloquée par le WAF",
           "condition": "C",
           "data": [
             {
@@ -157,7 +157,143 @@
               "datasourceUid": "loki",
               "model": {
                 "refId": "A",
-                "expr": "sum by (remote_addr, user_agent) (count_over_time({service=\"gateway\"} | json | __error__=\"\" | status=\"429\" [1m]))",
+                "expr": "sum by (client_ip) (count_over_time({service=\"waf\"} |= `\"is_interrupted\":true` | json client_ip=\"transaction.client_ip\" [1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        2
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "{{ printf `%.0f` .Values.B.Value }} requêtes bloquées par ModSecurity en 1 min depuis {{ .Labels.client_ip }}.",
+            "description": "Contenu malveillant (injection SQL, XSS, fichier sensible, outil de scan…). Après 5 blocages en 2 min, l'IP est bannie 1 h automatiquement. Règles déclenchées : tableau « WAF et bans ».",
+            "dashboard_url": "http://localhost:3000/d/ra-waf"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-ip-banned",
+          "title": "Adresse IP bannie",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (ip, source) (count_over_time({service=\"detector\"} | json | event=\"detector_ip_banned\" | source!=\"ml\" [1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "{{ .Labels.ip }} bannie (origine : {{ .Labels.source }}).",
+            "description": "Toutes ses requêtes reçoivent 403, interface comprise. Lever le ban : front, Administration > Sécurité. (Les bans décidés par le modèle ML sont signalés par « Attaque bloquée par le détecteur ML ».)",
+            "dashboard_url": "http://localhost:3000/d/ra-waf"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-rate-limited",
+          "title": "Limitation de débit déclenchée",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (client_ip, user_agent) (count_over_time({service=\"waf\"} |= `\"source\":\"waf\"` | json | __error__=\"\" | status=\"429\" [1m]))",
                 "instant": true,
                 "range": false,
                 "intervalMs": 1000,
@@ -202,9 +338,9 @@
           "execErrState": "KeepLast",
           "for": "0s",
           "annotations": {
-            "summary": "{{ printf `%.0f` .Values.B.Value }} requêtes refusées (429) en 1 min pour {{ .Labels.remote_addr }} ({{ .Labels.user_agent }}).",
-            "description": "Rafale sur la connexion au-delà de 10 requêtes par minute : force brute volumétrique probable.",
-            "dashboard_url": "http://localhost:3000/d/ra-logs"
+            "summary": "{{ printf `%.0f` .Values.B.Value }} requêtes refusées (429) en 1 min pour {{ .Labels.client_ip }} ({{ .Labels.user_agent }}).",
+            "description": "Au-delà de 20 requêtes/s par IP (WAF) ou de 10 connexions par minute (passerelle) : déni de service ou force brute volumétrique probable.",
+            "dashboard_url": "http://localhost:3000/d/ra-waf"
           },
           "labels": {
             "severity": "high"
@@ -213,7 +349,7 @@
         },
         {
           "uid": "ra-scan",
-          "title": "Balayage de la passerelle (rafale de 404)",
+          "title": "Balayage (rafale de 404)",
           "condition": "C",
           "data": [
             {
@@ -225,7 +361,7 @@
               "datasourceUid": "loki",
               "model": {
                 "refId": "A",
-                "expr": "sum by (remote_addr, user_agent) (count_over_time({service=\"gateway\"} | json | __error__=\"\" | status=\"404\" [1m]))",
+                "expr": "sum by (client_ip, user_agent) (count_over_time({service=\"waf\"} |= `\"source\":\"waf\"` | json | __error__=\"\" | status=\"404\" [1m]))",
                 "instant": true,
                 "range": false,
                 "intervalMs": 1000,
@@ -258,7 +394,7 @@
                     "evaluator": {
                       "type": "gt",
                       "params": [
-                        30
+                        20
                       ]
                     }
                   }
@@ -270,9 +406,9 @@
           "execErrState": "KeepLast",
           "for": "0s",
           "annotations": {
-            "summary": "{{ printf `%.0f` .Values.B.Value }} réponses 404 en 1 min pour {{ .Labels.remote_addr }} ({{ .Labels.user_agent }}).",
+            "summary": "{{ printf `%.0f` .Values.B.Value }} réponses 404 en 1 min pour {{ .Labels.client_ip }} ({{ .Labels.user_agent }}).",
             "description": "Recherche de routes cachées. Règle indépendante du ML : elle alerte même si le détecteur est arrêté.",
-            "dashboard_url": "http://localhost:3000/d/ra-logs"
+            "dashboard_url": "http://localhost:3000/d/ra-waf"
           },
           "labels": {
             "severity": "high"

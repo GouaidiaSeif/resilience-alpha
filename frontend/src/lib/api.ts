@@ -45,7 +45,7 @@ export interface ApiError {
 export type ApiResult<T> = ApiSuccess<T> | ApiError;
 
 interface RequestOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "DELETE";
   body?: unknown;
   token?: string | null;
   headers?: Record<string, string>;

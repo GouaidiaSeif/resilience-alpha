@@ -51,6 +51,27 @@ export interface AuditEvent {
   hash: string;
 }
 
+/** IP bannie (liste des bans du détecteur, appliquée par le WAF à chaque requête). */
+export type BanSource = "manual" | "waf" | "ml";
+
+export interface Ban {
+  ip: string;
+  source: BanSource;
+  reason: string;
+  created_at: number; // secondes epoch
+  until: number | null; // null = permanent
+  by: string | null;
+  remaining_seconds: number | null;
+}
+
+/** Client (IP et agent) bloqué temporairement par le modèle ML. */
+export interface MlBlock {
+  client: string;
+  remaining_seconds: number;
+  score: number;
+  service: string;
+}
+
 export interface AuditVerify {
   valid: boolean;
   checked: number;

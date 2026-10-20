@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+
+# Fichiers d'exécution locaux (PID et journal du relais d'IP réelle)
+.run/

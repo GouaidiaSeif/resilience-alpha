@@ -8,6 +8,7 @@ import {
   LogOut,
   Menu,
   ScrollText,
+  ShieldBan,
   Wallet,
   X,
   type LucideIcon,
@@ -40,6 +41,7 @@ const MAIN: Item[] = [
 const ADMIN: Item[] = [
   { href: "/admin/system", label: "Supervision", icon: Activity },
   { href: "/admin/audit", label: "Journal d'audit", icon: ScrollText },
+  { href: "/admin/security", label: "Sécurité", icon: ShieldBan },
 ];
 
 export interface NavUser {

@@ -6,7 +6,7 @@
     python ml/traffic.py scan --slow                           # variante discrète : débit / 5, agent « …-slow »
 
 Chaque requête porte un agent utilisateur explicite : les attaques sont donc étiquetables sans ambiguïté
-(features.label_of). Cible : BASE_URL (défaut http://localhost:8080, la passerelle).
+(features.label_of). Cible : BASE_URL (défaut http://localhost:8080, le WAF ; https://<hôte>:8443 en HTTPS).
 
 Attention : sous Docker Desktop, la passerelle voit tous les clients avec la même IP. La force brute déclenche
 alors le blocage anti-force brute d'auth pour TOUT le monde pendant 60 s (voir docs/02, section 3.1).
@@ -124,7 +124,8 @@ async def main() -> None:
     p.add_argument("--slow", action="store_true", help="attaque discrète : débit divisé par 5")
     a = p.parse_args()
     until = time.time() + a.duration
-    async with httpx.AsyncClient(base_url=BASE, timeout=10) as c:
+    # Certificat autosigné du WAF en laboratoire : vérification TLS désactivée sauf TLS_VERIFY=1.
+    async with httpx.AsyncClient(base_url=BASE, timeout=10, verify=os.environ.get("TLS_VERIFY") == "1") as c:
         if a.mode == "normal":
             sent = await asyncio.gather(*(normal_user(c, i, until) for i in range(a.users)))
             print(f"trafic normal : {a.users} utilisateurs, {sum(sent)} paiements, {a.duration:.0f} s")

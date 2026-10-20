@@ -12,7 +12,8 @@ sur la pile réelle le 2026-10-19 (pannes provoquées avec `docker stop`, attaqu
 1. [Reprise en cas d'erreur](#1-reprise-en-cas-derreur)
 2. [Idempotence, service par service](#2-idempotence-service-par-service)
 3. [Détection ML (Isolation Forest) et blocage des attaquants](#3-détection-ml-isolation-forest-et-blocage-des-attaquants)
-   — 3.6 comparaison des modèles, 3.7 le ML suffit-il ?, 3.8 détection actuelle, 3.10 pilotage, 3.13 alertes Discord
+   — 3.1 IP réelle, 3.6 comparaison des modèles, 3.7 le ML suffit-il ?, 3.8 détection actuelle, 3.10 pilotage,
+   3.13 alertes Discord, 3.14 WAF et liste des bans
 
 ---
 
@@ -204,59 +205,43 @@ sequenceDiagram
 Code : dossier `ml/` (voir `ml/README.md`). Tout ce qui suit a été exécuté sur la pile réelle le 2026-10-19 ;
 les chiffres sont ceux mesurés, pas des objectifs.
 
-### 3.1 Prérequis à connaître avant tout blocage : l'IP réelle de l'attaquant est masquée
+### 3.1 L'IP réelle de l'attaquant : masquée par Docker Desktop, rendue par le relais de l'hôte
 
-Test réalisé : une requête envoyée à `http://192.168.1.49:8080` (adresse LAN du PC Hôte) et une autre à
-`http://localhost:8080` apparaissent **toutes deux** avec `remote_addr = 172.21.0.1` dans le journal de la
-passerelle. **Docker Desktop (Windows/macOS) remplace l'adresse source** des connexions entrantes par celle de
-son réseau interne.
-
-Conséquences, **déjà vraies aujourd'hui** sans le détecteur :
+**Le problème** (mesuré le 2026-10-19) : une requête envoyée à `http://192.168.1.49:8080` (adresse réseau du PC
+Hôte) et une autre à `http://localhost:8080` arrivaient **toutes deux** avec la même adresse dans le conteneur.
+**Docker Desktop (Windows/macOS) remplace l'adresse source** des connexions vers un port publié. Conséquences sans
+correctif :
 
 | Mécanisme « par IP » | Ce qu'il fait réellement sous Docker Desktop |
 |---|---|
-| Limite Nginx 10 connexions/min/IP | **Une seule limite pour tous les clients extérieurs** |
-| Anti-force brute d'auth (5 échecs/min/IP) | Une attaque par force brute **bloque la connexion de tout le monde** pendant 60 s |
-| Bloquer « l'IP de l'attaquant » | Bloquerait tous les utilisateurs |
+| Limites de débit (WAF 20 req/s, connexion 10/min) | **Une seule limite pour tous les clients extérieurs** |
+| Anti-force brute d'auth (5 échecs/min/IP) | Une force brute **bloque la connexion de tout le monde** pendant 60 s |
+| Bannir « l'IP de l'attaquant » | Bannirait tous les utilisateurs (d'où le refus des adresses partagées, 3.14) |
 
-Le détecteur identifie donc un client par **`IP|User-Agent`** : cela distingue les clients dans le laboratoire,
-mais un attaquant qui change d'agent à chaque requête échapperait au blocage (pas à la détection globale).
+**La solution en place** : un relais sur le PC Hôte, `scripts/edge_relay.py`, lancé par `scripts/start.ps1` quand
+`EDGE_RELAY=true` dans `.env`. Il écoute 8080 et 8443 sur le réseau, annonce l'adresse du client en tête de
+connexion (**PROXY protocol**), puis relaie les octets tels quels vers des ports du WAF publiés en local
+(`127.0.0.1:18080` et `18443`). Le TLS reste terminé par le WAF : le relais ne voit jamais le contenu chiffré.
 
-**Pour retrouver l'IP réelle** (recommandé avant la démonstration) :
+```
+PC Attaquant 192.168.137.25 ──► relais (hôte, :8443) ──PROXY 192.168.137.25──► WAF :8444 ──X-Forwarded-For──► passerelle ──X-Real-IP──► services
+```
 
-1. *Proxy sur l'hôte* : publier la passerelle sur `127.0.0.1:8081` seulement et faire écouter un Nginx (ou Caddy)
-   **Windows** sur `192.168.137.1:8080`, qui ajoute l'IP du client :
-   ```nginx
-   # Nginx pour Windows, sur le PC Hôte
-   server {
-       listen 192.168.137.1:8080;
-       location / {
-           proxy_pass http://127.0.0.1:8081;
-           proxy_set_header X-Forwarded-For $remote_addr;
-       }
-   }
-   ```
-   puis, dans `gateway/nginx.conf` (module `realip`, inclus dans l'image) :
-   ```nginx
-   set_real_ip_from 172.16.0.0/12;     # seul le proxy de l'hôte peut atteindre la passerelle
-   real_ip_header   X-Forwarded-For;
-   ```
-   `$remote_addr` devient l'IP réelle : limites, anti-force brute, journaux et détecteur en profitent tous.
-2. *Hôte Linux* : avec Docker Engine sur Linux, les ports publiés conservent l'adresse source.
+Chaque maillon ne croit que l'adresse fixe du précédent : le WAF n'accepte l'en-tête PROXY que de l'hôte vu par
+Docker (`10.250.0.1`) sur ses ports relais ; la passerelle n'accepte `X-Forwarded-For` que du WAF (`10.250.0.5`),
+qui le **remplace** (jamais complété) par l'adresse qu'il a vue. Un client ne peut donc pas usurper une autre IP en
+envoyant lui-même ces en-têtes.
 
-Vérification : après une requête du PC Attaquant, `docker logs rsl-gateway --tail 5` doit montrer `192.168.137.x`.
+Vérifié le 2026-10-20 : une requête vers `https://192.168.1.49:8443` est vue en `192.168.1.49` par le WAF, la
+passerelle et le service auth ; limites, anti-force brute, journaux, modèle ML et liste des bans travaillent tous
+sur l'IP réelle. Vérification rapide après une requête du PC Attaquant : Grafana « WAF et bans », tableau « Clients
+les plus actifs », ou `docker logs rsl-waf --tail 5`.
 
-**Test avec un second PC sur le même réseau (configuration prévue).** Sans le proxy ci-dessus, le PC attaquant
-arrivera lui aussi en `172.21.0.1`, comme vos propres essais depuis le PC Hôte. Le front, lui, tourne dans son
-conteneur (`rsl-frontend`, adresse fixe `10.250.0.10`) : il a sa propre identité, exemptée par adresse et non par
-agent, donc impossible à usurper depuis l'extérieur. Conséquences concrètes pour le test :
-
-- le détecteur bloque bien le client `172.21.0.1|<agent de l'outil d'attaque>` sans gêner les utilisateurs du
-  front ;
-- une force brute envoyée **directement à la passerelle** depuis ce PC déclenche l'anti-force brute d'auth pour
-  tous les clients extérieurs (même IP), mais pas pour les utilisateurs du front (adresse différente) ;
-- un attaquant qui change d'agent à chaque requête échappe au blocage par client ; seul le retour de l'IP réelle
-  (proxy ci-dessus) le règle, et règle aussi l'anti-force brute.
+Sans relais (`EDGE_RELAY=false`, par exemple sous Linux où il est inutile : Docker Engine conserve l'adresse
+source), le WAF publie directement 8080 et 8443. Sous Docker Desktop sans relais, tous les clients extérieurs ont
+alors l'adresse `10.250.0.1` : le détecteur se rabat sur la clé `IP|User-Agent` (contournable en changeant d'agent)
+et aucune IP ne peut être bannie. Le pare-feu Windows demande, au premier lancement du relais, d'autoriser `python`
+sur les réseaux privés : accepter, sinon les autres postes ne joignent plus la plateforme.
 
 ### 3.2 Pourquoi un Isolation Forest (et pourquoi il ne suffit pas seul)
 
@@ -417,7 +402,10 @@ ci-dessous (défense en profondeur).
 
 | Couche | Mécanisme | Ce qu'il détecte ou empêche | Où le voir |
 |---|---|---|---|
-| Passerelle | Point d'entrée unique, `/internal/*` jamais exposé, corps ≤ 64 ko, en-têtes de sécurité | Accès direct aux services internes, gros corps | Journal d'accès (Loki `{service="gateway"}`) |
+| **WAF** | ModSecurity + OWASP CRS 4.25 (paranoïa 1, mode `On`) et règles maison, TLS, seul point d'entrée publié | Injection SQL, XSS, traversée de chemin, fichiers sensibles, outils de scan, méthodes non autorisées | Grafana « WAF et bans », Loki `{service="waf"}` |
+| WAF | Limite de débit par IP réelle (20 req/s, rafale 10 ; paiements : rafale 5 → 429) | Déni de service applicatif | Grafana « WAF et bans » |
+| **Liste des bans** | IP bannies (manuel, WAF, ML), contrôlées par le WAF à chaque requête, interface comprise | Retour d'un attaquant identifié, par l'API comme par l'interface | Front « Sécurité », audit `ip_banned` |
+| Passerelle | `/internal/*` jamais exposé, corps ≤ 64 ko, en-têtes de sécurité | Accès direct aux services internes, gros corps | Journal d'accès (Loki `{service="gateway"}`) |
 | Passerelle | Limite de débit de la connexion (10/min, rafale 5 → 429) | Force brute volumétrique | Grafana « Journaux et sécurité » |
 | auth | 5 échecs/min par IP **et** par identifiant → 429 ; temps de réponse constant | Force brute, énumération de comptes | Audit `login_failed` / `login_blocked` |
 | Tous les services | JWT signé (15 min), rôles, jetons de service par appelant | Accès non autorisé, appel interne usurpé | 401/403 dans les journaux |
@@ -428,17 +416,19 @@ ci-dessous (défense en profondeur).
 | Prometheus | `up`, taux de 5xx, latences | Panne, dégradation | Grafana « Trafic et paiements » |
 | remediation | Liste blanche, disjoncteur, escalade des anomalies | Réaction automatique bornée | Supervision (front), audit `incident_*` |
 | **detector (ML)** | Hybride IF + bornes + supervisé, blocage temporaire | Balayage, énumération, inondation, force brute, bourrage d'identifiants | Audit `traffic_blocked`, Grafana « Détection ML » |
-| Alertes Grafana | 12 règles sur Prometheus et Loki, livrées sur Discord (3.13) | Attaque bloquée, force brute, 429, balayage, audit altéré, panne, remédiation en échec | Discord, Grafana « Alertes » |
+| Alertes Grafana | 14 règles sur Prometheus et Loki, livrées sur Discord (3.13) | Attaque bloquée (ML, WAF), IP bannie, force brute, 429, balayage, audit altéré, panne, remédiation en échec | Discord, Grafana « Alertes » |
 
-**Pas encore en place** : WAF (emplacement prévu dans `gateway/nginx.conf`), SIEM, TLS.
+**Pas encore en place** : SIEM, certificat TLS reconnu (autosigné en laboratoire), paranoïa CRS 2 et plus.
 
 ### 3.9 Détection en temps réel et blocage
 
 ```mermaid
 flowchart LR
-    A[Attaquant] -->|requête| G[gateway Nginx]
-    G -->|auth_request<br/>X-Client-Key| D[detector<br/>/internal/check]
-    D -->|204 passe · 403 bloqué| G
+    A[Attaquant] -->|requête| W[WAF<br/>ModSecurity]
+    W -->|auth_request<br/>toute requête| G[gateway Nginx]
+    G -->|/_waf/check · /api : auth_request<br/>X-Client-Key| D[detector<br/>/internal/check]
+    D -->|204 passe · 403 IP bannie ou client bloqué| G
+    W -->|pages| F[frontend]
     G --> S[services]
     G -->|journal JSON| P[Promtail] --> L[Loki]
     L -->|toutes les 5 s<br/>30 dernières s| D
@@ -457,14 +447,18 @@ anormal **2 fois de suite** est bloqué **10 min** (`BLOCK_TTL_SECONDS`), puis :
   épuiser le disjoncteur de la remédiation (section 1.7) ;
 - logs `detector_anomaly`, `detector_blocked`, `detector_unblocked` dans Loki.
 
-**Blocage à la passerelle** (`gateway/nginx.conf`, actif par défaut) : avant chaque requête, Nginx appelle
-`GET detector:8000/internal/check` avec l'en-tête `X-Client-Key: $remote_addr|$http_user_agent` (posé par Nginx,
-le client ne peut pas le forger). 204 ⇒ la requête continue ; 403 ⇒ réponse JSON « Accès temporairement
-bloqué ». Deux détails qui comptent :
+**Blocage à l'entrée** : avant **chaque** requête externe (pages du front comprises), le WAF demande au détecteur,
+via la passerelle (`/_waf/check`, réservé au WAF et jamais journalisé), si le client est autorisé. La passerelle
+refait le même contrôle sur `/api/*` (défense en profondeur, et contrôle des appels du front). Le détecteur reçoit
+`X-Client-Key: <IP réelle>|<agent>` (posé par Nginx, le client ne peut pas le forger) et répond 204 (passe) ou 403
+avec `X-Block-Reason: banned` (IP bannie) ou `anomaly` (client bloqué par le modèle). Réponse au client : JSON
+« Adresse IP bannie » ou « Accès temporairement bloqué » sur l'API, page HTML équivalente sur l'interface.
+Sans le contrôle au WAF, un client banni aurait pu continuer par l'interface : le front appelle l'API avec sa
+propre adresse, jamais bannie. Deux détails qui comptent :
 
-- **Ouverture par défaut** : détecteur absent, arrêté ou lent (> 300 ms) ⇒ la requête passe. Vérifié :
-  détecteur arrêté, un client précédemment bloqué repasse. Coût pendant la panne du détecteur : ~300 ms par
-  requête (délai de connexion), à réduire si besoin.
+- **Ouverture par défaut** : détecteur absent, arrêté ou lent (> 300 ms) ⇒ la requête passe. Vérifié le
+  2026-10-20 : détecteur arrêté, pages et API répondent (≈ 0,6 s pour une page, ≈ 1 s pour l'API pendant la
+  panne, contre plus de 4 s avant de borner l'attente DNS de la passerelle à 500 ms).
 - **Piège Nginx corrigé pendant les essais** : `return 404` s'exécute **avant** `auth_request` (phase rewrite) ;
   un client bloqué qui balayait des chemins inconnus recevait donc toujours 404. Les emplacements de repli
   utilisent `try_files … @notfound`, exécuté après le contrôle.
@@ -491,11 +485,15 @@ docker compose logs -f detector
 # Grafana : tableau « Détection ML » (http://localhost:3000/d/ra-detection)
 # ou Explore → Loki :  {service="detector"} | json | event="detector_blocked"
 
-# Lister les clients bloqués (le détecteur n'est pas exposé : passer par son conteneur, avec un jeton de service)
-docker exec rsl-detector python -c "from resilience_common.security import service_token as t; import httpx; print(httpx.get('http://localhost:8000/internal/blocked', headers={'Authorization': 'Bearer ' + t('remediation')}).json())"
-
-# Débloquer un client
-docker exec rsl-detector python -c "from resilience_common.security import service_token as t; import httpx; print(httpx.post('http://localhost:8000/internal/unblock', json={'client': '172.21.0.1|rsl-attack-scan/1.0'}, headers={'Authorization': 'Bearer ' + t('remediation')}).json())"
+# Bans et clients bloqués : front, Administration > Sécurité (https://localhost:8443/admin/security), ou l'API
+# d'administration (rôle admin) par le WAF :
+TOKEN=$(curl -sk https://localhost:8443/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<ADMIN_PASSWORD>"}' | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+curl -sk https://localhost:8443/api/security/bans   -H "Authorization: Bearer $TOKEN"     # IP bannies
+curl -sk https://localhost:8443/api/security/blocks -H "Authorization: Bearer $TOKEN"     # clients bloqués par le ML
+curl -sk -X POST https://localhost:8443/api/security/bans -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"ip":"192.168.137.25","reason":"Balayage","duration_minutes":60}'                 # durée absente = permanent
+curl -sk -X DELETE https://localhost:8443/api/security/bans/192.168.137.25 -H "Authorization: Bearer $TOKEN"
 
 # Recharger un modèle ré-entraîné sans redémarrer : POST /internal/reload (même principe)
 
@@ -508,7 +506,8 @@ Métriques collectées par Prometheus (cible `detector:8000`) et affichées dans
 | Métrique | Contenu |
 |---|---|
 | `detector_model_loaded`, `detector_threshold` | Modèle chargé, seuil de score de la forêt |
-| `detector_checks_total{result}` | Contrôles de la passerelle : `allowed` (204) ou `blocked` (403) |
+| `detector_checks_total{result, origin}` | Contrôles avant requête : `allowed`, `blocked` (client bloqué), `banned` (IP bannie) ; `origin` = `waf` (toute requête externe) ou `gateway` (requêtes `/api`) |
+| `detector_banned_ips`, `detector_bans_total{source}` | IP bannies maintenant, bans cumulés par origine (`manual`, `waf`, `ml`) |
 | `detector_blocked_clients`, `detector_blocks_total{target_service}` | Clients bloqués maintenant, blocages cumulés |
 | `detector_anomalies_total`, `detector_anomaly_reasons_total{reason}` | Fenêtres anormales, par règle (`forest`, `bounds`, `supervised`) |
 | `detector_min_score`, `detector_max_attack_probability` | Score le plus anormal et probabilité d'attaque la plus haute de la dernière évaluation |
@@ -523,33 +522,43 @@ Métriques collectées par Prometheus (cible `detector:8000`) et affichées dans
 | `ALERT_COOLDOWN_SECONDS` | 600 | Une alerte de remédiation par service au plus |
 | `ALLOW_HOSTS` | `canary,10.250.0.10` (sonde, front) | Jamais bloqués (nom ou adresse de conteneur) |
 | `ALLOW_UA_REGEX` | vide | Exemption par agent utilisateur : à éviter (falsifiable) |
+| `NEVER_BAN` | `127.0.0.0/8,::1/128,10.250.0.0/24` | Adresses jamais bannies (partagées : boucle locale, hôte Docker, WAF, front) |
+| `ML_BAN_IP` | `true` | Un blocage par le modèle bannit aussi l'IP (si elle n'est pas partagée), pour `BLOCK_TTL_SECONDS` |
+| `WAF_AUTOBAN`, `WAF_BAN_THRESHOLD`, `WAF_BAN_WINDOW_SECONDS`, `WAF_BAN_TTL_SECONDS` | `true`, 5, 120, 3600 | Ban automatique après N requêtes bloquées par le WAF dans la fenêtre |
+| `BANS_PATH` | `/data/bans.json` | Liste des bans (volume `detector-data`, survit aux redémarrages) |
 
 ### 3.11 Limites et pistes d'amélioration
 
 | Limite | Piste |
 |---|---|
-| IP réelle masquée par Docker Desktop (3.1) | Proxy sur l'hôte + `realip`, ou hôte Linux |
-| Clé `IP\|User-Agent` contournable (rotation d'agent) | Une fois l'IP réelle disponible, clé = IP ; agréger aussi par compte (`sub` du jeton) |
-| Le front est une seule identité, exemptée (son conteneur) | Faire transmettre par le front l'IP et l'agent du navigateur (`X-Forwarded-For` de confiance) |
-| Liste de blocage en mémoire | La persister (Redis) si le détecteur doit redémarrer pendant une attaque |
+| IP réelle : dépend du relais de l'hôte sous Docker Desktop (3.1) | Hôte Linux (Docker Engine) : adresse source conservée, relais inutile |
+| Blocage ML par client (`IP\|User-Agent`) contournable par rotation d'agent | Déjà compensé par le ban de l'IP (`ML_BAN_IP`) quand l'IP réelle est disponible ; agréger aussi par compte (`sub` du jeton) |
+| Le front est une seule identité pour le modèle (son conteneur, exempté) | Le WAF contrôle déjà chaque navigateur par son IP ; faire transmettre par le front l'IP du navigateur à l'API pour l'anti-force brute d'auth |
+| Blocages ML en mémoire (les bans, eux, sont persistés) | Persister aussi les blocages (Redis) ; liste des bans partagée entre réplicas |
 | Modèle figé, petit jeu d'entraînement | Ré-entraînement planifié (ex. chaque nuit sur 24 h) ; surveiller la dérive (`detector_min_score`) |
 | Variables limitées à la passerelle | Ajouter les événements d'auth (`login_failed` par identifiant), les métriques Prometheus, l'heure |
-| Pas d'analyse du contenu des requêtes | Compléter par un WAF (ModSecurity/Coraza + OWASP CRS) à l'emplacement prévu dans `gateway/nginx.conf` |
+| Le ML n'analyse pas le contenu des requêtes | Couvert par le WAF (3.14) ; monter la paranoïa CRS à 2 après une période en `DetectionOnly` |
 
 ### 3.12 Déroulé de démonstration conseillé
 
-1. Lancer la pile (`scripts/start.ps1`). Ouvrir Grafana « Détection ML », le front (page Supervision) et le
-   salon Discord des alertes.
-2. Depuis le PC Attaquant : `BASE_URL=http://192.168.137.1:8080 python ml/traffic.py scan --duration 60`.
-3. Montrer : les 404 montent dans Grafana puis deviennent des 403 en ~15 s ; Journal d'audit du front, service
-   « Détecteur » : `traffic_blocked` avec les motifs ; Supervision : incident `escalated`, aucun redémarrage ;
-   la sonde reste verte ; Discord : « Attaque bloquée par le détecteur ML » et « Balayage de la passerelle ».
-4. Expliquer la différence avec une panne (section 1) : une panne est réparée puis prouvée ; une attaque est
+1. Lancer la pile (`scripts/start.ps1`, relais d'IP réelle compris). Ouvrir Grafana « WAF et bans » et
+   « Détection ML », le front (pages Sécurité et Supervision) et le salon Discord des alertes.
+2. Depuis le PC Attaquant : `BASE_URL=https://192.168.137.1:8443 python ml/traffic.py scan --duration 60`
+   (certificat autosigné accepté par le générateur ; `TLS_VERIFY=1` pour le vérifier).
+3. Montrer : les requêtes vers les fichiers sensibles sont bloquées par ModSecurity (règle 930130), le modèle
+   bloque le client en ~10 s, l'**IP réelle** de l'attaquant apparaît dans la page Sécurité (origine WAF ou ML) ;
+   toutes ses requêtes reçoivent 403, interface comprise ; Supervision : incident `escalated`, aucun
+   redémarrage ; la sonde reste verte ; Discord : « Attaque bloquée par le WAF », « Attaque bloquée par le
+   détecteur ML », « Adresse IP bannie ».
+4. Injection à la main : `curl -k "https://192.168.137.1:8443/api/payments?q=1'%20UNION%20SELECT%20password%20FROM%20users--"`
+   ⇒ 403 « Requête rejetée par le pare-feu applicatif » ; à la 5e en 2 min, l'IP est bannie 1 h.
+5. Lever le ban depuis la page Sécurité : l'attaquant retrouve l'accès immédiatement.
+6. Expliquer la différence avec une panne (section 1) : une panne est réparée puis prouvée ; une attaque est
    bloquée et escaladée, sans effacer les preuves.
 
 ### 3.13 Alertes Grafana, livrées sur Discord
 
-Douze règles provisionnées (`infra/grafana/provisioning/alerting/rules.json`, générées par
+Quatorze règles provisionnées (`infra/grafana/provisioning/alerting/rules.json`, générées par
 `infra/grafana/build_alerts.py`), évaluées toutes les 10 s, sur les mêmes sources que les tableaux. Chaque
 message Discord indique ce qui se passe, la gravité, l'heure et le lien du tableau à ouvrir ; un second message
 signale la résolution.
@@ -557,9 +566,11 @@ signale la résolution.
 | Règle | Source | Déclenchement | Gravité |
 |---|---|---|---|
 | Attaque bloquée par le détecteur ML | Loki `detector_blocked` | Un client bloqué (une alerte par client) | critique |
+| Attaque bloquée par le WAF | Loki, journal d'audit ModSecurity | > 2 requêtes bloquées en 1 min pour une IP | élevée |
+| Adresse IP bannie | Loki `detector_ip_banned` (origine WAF ou manuel ; ML : alerte ci-dessus) | Un ban | critique |
 | Force brute sur la connexion | Loki `login_failed`, `login_blocked` | ≥ 10 échecs en 2 min pour une IP | élevée |
-| Limitation de débit déclenchée à la passerelle | Loki, journal d'accès | > 5 réponses 429 en 1 min pour un client | élevée |
-| Balayage de la passerelle (rafale de 404) | Loki, journal d'accès | > 30 réponses 404 en 1 min pour un client | élevée |
+| Limitation de débit déclenchée | Loki, journal d'accès du WAF | > 5 réponses 429 en 1 min pour un client | élevée |
+| Balayage (rafale de 404) | Loki, journal d'accès du WAF | > 20 réponses 404 en 1 min pour un client | élevée |
 | Piste d'audit altérée | Loki `audit_chain_broken` | Un événement | critique |
 | Soldes incohérents avec le ledger | Prometheus `canary_data_consistent` | 0 pendant 10 s | critique |
 | Détecteur ML arrêté | Prometheus `up{job="detector"}` | 0 pendant 30 s | élevée |
@@ -569,7 +580,7 @@ signale la résolution.
 | Remédiation en échec | Loki `remediation_step` | État `failed` ou `suppressed` (disjoncteur) | critique |
 | Taux d'erreurs serveur élevé | Prometheus `http_requests_total` | > 5 % de 5xx pendant 1 min | modérée |
 
-Les règles 404, 429 et force brute ne dépendent pas du ML : elles alertent même détecteur arrêté (défense en
+Les règles WAF, 404, 429 et force brute ne dépendent pas du ML : elles alertent même détecteur arrêté (défense en
 profondeur, section 3.7).
 
 **Configurer Discord** : salon > Modifier le salon > Intégrations > Webhooks > Nouveau webhook > Copier l'URL,
@@ -584,3 +595,66 @@ tant que l'alerte reste active. Heures affichées dans le fuseau `TZ` de `.env` 
 Essai (2026-10-20) : balayage de 40 s, client bloqué 9 s après le début ; « Balayage de la passerelle » envoyé
 à Discord 1 s après le blocage, « Attaque bloquée par le détecteur ML » 3 s après ; livraison acceptée par
 Discord (statut du point de contact sans erreur).
+
+### 3.14 WAF (ModSecurity + OWASP CRS) et liste des bans
+
+**Place dans l'architecture** : le WAF (`rsl-waf`, image `owasp/modsecurity-crs:4.25.2-nginx-alpine-…-lts`,
+version épinglée) est le **seul** composant publié. Il termine le TLS (certificat autosigné généré par l'image),
+applique les règles, la limite de débit par IP et le contrôle de la liste des bans, puis confie `/api/*` à la
+passerelle et les pages au front. La passerelle n'est plus publiée ; le front ne l'est qu'en local
+(`127.0.0.1:3001`, débogage). Configuration dans `waf/` :
+
+| Fichier | Rôle |
+|---|---|
+| `default.conf.template` | Deux serveurs : accès direct (8080 HTTP, 8443 HTTPS) et accès par le relais (PROXY protocol, IP réelle) ; journal d'accès JSON (`client_ip`, `scheme`, `status`…) |
+| `includes/waf_routes.conf.template` | Routes : contrôle bans + ML de chaque requête, pages du front (liste explicite), `/api/*` et tout autre chemin vers la passerelle (le modèle ML voit ainsi les balayages), réponses de blocage (JSON pour l'API, page HTML pour l'interface), page 404 |
+| `includes/waf_proxy.conf.template`, `waf_tls.conf.template` | En-têtes transmis (`X-Forwarded-For` remplacé, `Host` avec le port pour les Server Actions), TLS |
+| `custom-rules.conf` | Règles maison, chargées après le CRS : outils de scan reconnus à leur agent (`sqlmap`, `nikto`…) bloqués ; seuil d'anomalie abaissé à 3 sur `/api/payments` ; exclusion 920350 (« Host numérique » : en laboratoire tout le monde utilise une IP) |
+| `exclusions-before-crs.conf` | Exclusions chargées avant le CRS, **sur les pages du front uniquement** (jamais `/api`) : `text/plain` autorisé (Server Actions appelées en JavaScript, règle 920420) et 922130 (champs de formulaire Next.js `1_$ACTION_ID_…`). Une seule exception côté API : le paramètre `client` de `DELETE /api/security/blocks` (admin) est soustrait aux règles d'injection de commande, car il contient l'agent d'un outil (`python-requests`…) ; la même valeur reste bloquée partout ailleurs (vérifié) |
+
+**Pourquoi une requête est bloquée** : chaque règle du CRS qui correspond ajoute des points selon sa gravité
+(critique 5, erreur 4, avertissement 3, note 2) ; à 5 points (3 sur `/api/payments`), la règle 949110 bloque
+(403). Exemple mesuré : `/.env` déclenche 930130 « Restricted File Access Attempt » (5 points) ⇒ 403. La règle en
+cause figure dans Grafana « WAF et bans » (tableau « Règles qui ont bloqué ») et dans Explore :
+`{service="waf"} |= "transaction"` (champ `ruleId`). Méthodes autorisées : GET, HEAD, POST, OPTIONS, DELETE
+(`ALLOWED_METHODS`).
+
+**Faux positifs constatés et corrigés** en faisant passer le parcours complet de l'interface (35 vérifications)
+par le WAF : 920350 (Host numérique), 922130 et 920420 (Server Actions de Next.js) ; puis 932235 sur le déblocage d'un client `python-httpx` par l'API. Après correction : 35/35, aucun
+blocage du trafic légitime. Pour valider une nouvelle règle sans risque : `WAF_RULE_ENGINE=DetectionOnly` dans
+`.env` puis `docker compose up -d waf` (journalise sans bloquer ; le ban automatique compte alors les détections).
+
+**Liste des bans** (`ml/bans.py`, tenue par le détecteur, fichier `bans.json` sur le volume `detector-data`) :
+
+| Origine | Déclencheur | Durée |
+|---|---|---|
+| WAF | 5 requêtes bloquées par ModSecurity (ou jugées attaques en `DetectionOnly`) en 2 min | 1 h |
+| Modèle ML | Client bloqué pour trafic anormal (3.9) | 10 min |
+| Manuel | Administrateur, page Sécurité du front ou `POST /api/security/bans` | Choisie (1 h à 30 j) ou permanente |
+
+Règles de sûreté : adresses partagées jamais bannies (`NEVER_BAN` : boucle locale, hôte Docker vu sans relais, WAF,
+front ; la sonde non plus) ; un administrateur ne peut pas bannir sa propre adresse depuis le front ; un ban plus
+court ne remplace pas un ban plus long ; après une levée manuelle, les blocages WAF antérieurs ne comptent plus
+(sinon le ban automatique reviendrait aussitôt) ; chaque ban et chaque levée sont inscrits dans l'audit
+(`ip_banned`, `ip_unbanned`) et signalés sur Discord.
+
+**Essais du 2026-10-20**, à travers le WAF en HTTPS, depuis l'adresse réseau du PC Hôte (IP réelle), 40 s par
+attaque :
+
+| Attaque | ModSecurity | Limites de débit | Modèle ML | Ban |
+|---|---|---|---|---|
+| Balayage (`scan`) | 31 requêtes bloquées (930130) | — | bloqué | IP bannie |
+| Force brute | — | 98 × 429 | bloqué | IP bannie (ML) |
+| Inondation (`flood`) | — | — | bloqué (298 × 403) | IP bannie (ML) |
+| Énumération | — | — | bloqué (155 × 403) | IP bannie (ML) |
+| Rafale de paiements | — | — | bloqué (115 × 403) | IP bannie (ML) |
+| Bourrage d'identifiants (inédit) | — | 63 × 429 | bloqué | IP bannie (ML) |
+| 6 injections SQL à la main | 6 × 403 | — | — | IP bannie 1 h (WAF) |
+
+Les deux mécanismes se complètent : le WAF arrête le **contenu** malveillant (que le modèle ne voit pas), le modèle
+arrête le **comportement** anormal (que les règles ne voient pas). Une adresse bannie reçoit 403 sur l'API **et**
+sur l'interface ; levée du ban : accès rétabli immédiatement.
+
+**Ajouter une page au front** : l'ajouter à la liste des routes du front dans
+`waf/includes/waf_routes.conf.template` (sinon elle part à la passerelle et répond « Page introuvable »), puis
+`docker compose restart waf`.
