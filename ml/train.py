@@ -58,7 +58,8 @@ def load_records(args) -> list[dict]:
 
 
 def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """Empreinte indépendante des fins de ligne (Git peut convertir LF/CRLF selon le poste)."""
+    return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
 def rel(path: str) -> str:
@@ -84,7 +85,8 @@ def main() -> None:
     records = load_records(a)
     if a.save_data:
         Path(a.save_data).parent.mkdir(parents=True, exist_ok=True)
-        Path(a.save_data).write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
+        # LF sur tous les postes, comme dans Git (sous Windows, write_text écrirait sinon des CRLF).
+        Path(a.save_data).write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8", newline="\n")
     # Provenance : fichiers relus (chemin relatif au dépôt, empreinte) ou périodes Loki, pour rejouer l'entraînement.
     sources = [{"file": rel(f), "sha256": sha256(Path(f))} for f in [*(a.from_file or []), *([a.save_data] if a.save_data else [])]]
     sources += [{"loki_range": [float(x), float(y)]} for x, y in a.range or []]

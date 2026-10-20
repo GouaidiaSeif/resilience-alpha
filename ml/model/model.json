@@ -42,7 +42,7 @@
     "payspam",
     "scan"
   ],
-  "trained_at": "2026-10-20T17:08:23.230500+00:00",
+  "trained_at": "2026-10-20T17:46:45.362819+00:00",
   "windows": 709,
   "attack_windows": 38,
   "clients": 9,
@@ -50,7 +50,7 @@
   "data": [
     {
       "file": "ml/data/train.jsonl",
-      "sha256": "cfd11694318b96f816d8990a581bb5e0553aa20468974f0cac9583686ea962e9"
+      "sha256": "ce641eee63a79d5913ad0cfaf9f06a2cbaa81f644ddc389d2b7e6ee2ac0b4ed4"
     }
   ],
   "versions": {
