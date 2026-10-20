@@ -22,8 +22,10 @@ vérifiées sur la pile en fonctionnement le 2026-10-19 (index, contraintes et d
 ## 1. Vue d'ensemble
 
 ```
-Client ──► gateway (Nginx :8080) ──► auth · accounts · payments · notifications · audit      (/api/*)
-                                       │
+Navigateur ──► frontend (Next.js :3001) ──┐
+Client ──────────────────────────────────► gateway (Nginx :8080) ──► auth · accounts · payments · notifications · audit  (/api/*)
+                                            │  └─ avant chaque requête : detector /internal/check (204 ou 403)
+                                            │
            payments ──/internal/transfer──► accounts          (règlement d'un paiement)
            tous ──/internal/events──► audit, notifications    (événements, au mieux)
            canary ──paiement réel via la passerelle──► … ──alerte──► remediation ──proxy Docker──► conteneurs
@@ -38,6 +40,8 @@ Client ──► gateway (Nginx :8080) ──► auth · accounts · payments ·
 | audit | `audit` | `svc_audit` | 8000 | `/api/audit/*` (admin) |
 | remediation | aucun | aucun | 8000 | non (interne) |
 | canary | aucun | aucun | 8000 | non (interne) |
+| detector (ML) | aucun | aucun | 8000 | non (consulté par la passerelle) |
+| frontend | aucun | aucun | 3001 (publié) | non : il appelle la passerelle |
 
 **Conventions transverses**
 
@@ -313,7 +317,9 @@ required=True)` lit la configuration ; les secrets n'arrivent que par l'environn
 ### 3.5 Logs (`logs.py`)
 
 Une ligne JSON par événement sur stdout : `ts`, `level`, `service`, `logger`, `msg`, `request_id`, `event`
-(snake_case, sert de clé de requête LogQL) et les champs propres à l'événement.
+(snake_case, sert de clé de requête LogQL) et les champs propres à l'événement. Un champ d'événement ne remplace
+jamais l'en-tête : `service` reste le service **émetteur** ; le service concerné par un événement s'écrit
+`target_service` (remédiation, sonde, détecteur), et une collision accidentelle devient `field_<nom>`.
 
 ---
 
@@ -471,6 +477,31 @@ automatiquement), ouvre deux comptes au premier passage, fait un paiement de **0
 **via la passerelle**, puis contrôle l'intégrité du ledger. Après 3 échecs consécutifs, alerte la remédiation
 (une alerte par service toutes les 30 s au plus). Métriques `canary_*` (voir README 10.2).
 
+### 4.8 detector — détection ML et liste de blocage (interne)
+
+Image `ml/Dockerfile`, code `ml/detector.py`, lancé avec la pile. Aucune base : le modèle est lu dans
+`ml/model/model.joblib` (monté en lecture seule), la liste de blocage est en mémoire.
+
+| Méthode, chemin | Accès | Réponse |
+|---|---|---|
+| `GET /internal/check` | passerelle (`auth_request`, en-tête `X-Client-Key: IP\|agent`) | **204** client autorisé, **403** client bloqué |
+| `GET /internal/blocked` | admin, service | `[{client, remaining_seconds, score, service}]` |
+| `POST /internal/unblock` | admin, service | `{client}` → `{unblocked: bool}` |
+| `POST /internal/reload` | admin, service | Recharge le modèle → `{loaded: bool}` |
+
+Toutes les 5 s : lit dans Loki les 30 dernières secondes du journal d'accès de la passerelle, calcule les
+variables par client et applique le modèle hybride. Deux évaluations anormales de suite : blocage 10 min, audit
+`traffic_blocked`, alerte `anomaly` à la remédiation (escalade, pas de redémarrage). Jamais bloqués : la sonde et
+le front (adresses de conteneur). Métriques `detector_*` : doc 02, section 3.10.
+
+### 4.9 frontend — interface (BFF Next.js)
+
+Image `frontend/Dockerfile` (sortie « standalone », utilisateur non root, système de fichiers en lecture seule),
+conteneur `rsl-frontend` publié sur le port 3001. Seul le serveur Next.js appelle la passerelle
+(`http://gateway:8080`, réseau `web`) ; le jeton JWT reste dans un cookie httpOnly. Adresse fixe `10.250.0.10`,
+exemptée par le détecteur ML (tous les utilisateurs de l'interface la partagent). `GET /bff/ping` sert de
+contrôle de santé du conteneur. Détails : `frontend/README.md`.
+
 ---
 
 ## 5. Passerelle Nginx
@@ -479,15 +510,19 @@ automatiquement), ouvre deux comptes au premier passage, fait un paiement de **0
 
 | Chemin | Destination | Particularités |
 |---|---|---|
-| `= /api/auth/login` | auth | **Limite 10 req/min par IP**, rafale 5, puis 429 |
+| `= /api/auth/login` | auth | **Limite 10 req/min par IP**, rafale 5, puis 429 ; contrôle du détecteur |
 | `/api/auth` | auth | |
 | `/api/accounts` | accounts | |
 | `/api/payments` | payments | |
 | `/api/notifications` | notifications | |
 | `/api/audit` | audit | Rôle admin vérifié par le service |
-| `^~ /internal/` | — | **404** : jamais exposé |
+| `^~ /internal/` | — | **404** : jamais exposé (403 si le client est bloqué) |
 | `= /gateway-health` | — | 200 `ok` (santé du conteneur) |
-| `/` (reste) | — | 404 JSON (`/docs`, `/metrics`, `/ready` des services ne sont pas routés) |
+| `/` (reste) | — | 404 JSON (`/docs`, `/metrics`, `/ready` des services ne sont pas routés) ; 403 si le client est bloqué |
+
+**Contrôle du détecteur ML** : chaque emplacement ci-dessus (sauf `/gateway-health`) appelle d'abord
+`detector:8000/internal/check` (`auth_request`, délai 300 ms). 403 ⇒ réponse JSON « Accès temporairement
+bloqué : trafic anormal détecté ». Détecteur absent, arrêté ou lent ⇒ la requête passe (ouverture par défaut).
 
 Réglages : résolution DNS dynamique (`resolver 127.0.0.11 valid=5s` + variable) pour retrouver un service
 redémarré sans recharger Nginx ; corps limité à 64 ko ; délais 2 s (connexion) / 10 s (lecture) ;

@@ -77,7 +77,7 @@ def _step(inc: dict, state: str, message: str, **extra) -> None:
     inc["status"] = state
     inc["updated_at"] = _now()
     inc["timeline"].append({"ts": _now(), "state": state, "message": message, **extra})
-    log_event(log, "remediation_step", incident_id=inc["id"], service=inc["service"], state=state, message=message)
+    log_event(log, "remediation_step", incident_id=inc["id"], target_service=inc["service"], state=state, message=message)
 
 
 async def docker_restart(http: httpx.AsyncClient, container: str) -> None:

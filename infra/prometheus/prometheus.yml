@@ -13,3 +13,8 @@ scrape_configs:
       - {targets: ["audit:8000"],         labels: {service: audit}}
       - {targets: ["remediation:8000"],   labels: {service: remediation}}
       - {targets: ["canary:8000"],        labels: {service: canary}}
+
+  - job_name: detector
+    metrics_path: /metrics
+    static_configs:
+      - {targets: ["detector:8000"], labels: {service: detector}}

@@ -2,6 +2,8 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   poweredByHeader: false,
+  // Image Docker minimale : serveur autonome + dépendances strictement utilisées (frontend/Dockerfile).
+  output: "standalone",
   async headers() {
     return [
       {

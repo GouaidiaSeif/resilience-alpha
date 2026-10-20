@@ -55,6 +55,24 @@
       "keepTime": true,
       "targetBlank": false,
       "tooltip": ""
+    },
+    {
+      "title": "Détection ML",
+      "type": "link",
+      "url": "/d/ra-detection",
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "tooltip": ""
+    },
+    {
+      "title": "Alertes",
+      "type": "link",
+      "url": "/alerting/list",
+      "icon": "bolt",
+      "keepTime": false,
+      "targetBlank": false,
+      "tooltip": "Règles d'alerte (livrées sur Discord)"
     }
   ],
   "annotations": {
@@ -80,7 +98,7 @@
         "enable": true,
         "iconColor": "#fab219",
         "expr": "{service=\"canary\"} | json | event=\"canary_alert_sent\"",
-        "textFormat": "Alerte envoyée à la remédiation : {{service_extracted}} ({{type}})",
+        "textFormat": "Alerte envoyée à la remédiation : {{target_service}} ({{type}})",
         "tagKeys": "",
         "titleFormat": "Alerte sonde"
       },
@@ -106,7 +124,7 @@
         "enable": true,
         "iconColor": "#0ca30c",
         "expr": "{service=\"remediation\"} | json | event=\"remediation_step\" | state=\"resolved\"",
-        "textFormat": "{{service_extracted}} : {{message}}",
+        "textFormat": "{{target_service}} : {{message}}",
         "tagKeys": "",
         "titleFormat": "Reprise prouvée"
       }
@@ -1260,7 +1278,7 @@
       "type": "logs",
       "id": 15,
       "title": "Déroulé des reprises",
-      "description": "Étapes du moteur (detected → remediating → verifying → resolved). Le service concerné est service_extracted (le champ JSON écrase le label).",
+      "description": "Étapes du moteur (detected → remediating → verifying → resolved). Le service concerné est le champ target_service.",
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -1278,7 +1296,7 @@
             "uid": "loki"
           },
           "refId": "A",
-          "expr": "{service=\"remediation\"} | json | event=\"remediation_step\" | line_format \"{{.service_extracted}} · {{.state}} · {{.message}}\"",
+          "expr": "{service=\"remediation\"} | json | event=\"remediation_step\" | line_format \"{{.target_service}} · {{.state}} · {{.message}}\"",
           "queryType": "range"
         }
       ],

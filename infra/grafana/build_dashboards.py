@@ -267,18 +267,27 @@ LINKS = [
     {"title": "Reprise autonome", "type": "link", "url": "/d/ra-recovery", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
     {"title": "Trafic et paiements", "type": "link", "url": "/d/ra-traffic", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
     {"title": "Journaux et sécurité", "type": "link", "url": "/d/ra-logs", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
+    {"title": "Détection ML", "type": "link", "url": "/d/ra-detection", "icon": "dashboard", "keepTime": True, "targetBlank": False, "tooltip": ""},
+    {"title": "Alertes", "type": "link", "url": "/alerting/list", "icon": "bolt", "keepTime": False, "targetBlank": False, "tooltip": "Règles d'alerte (livrées sur Discord)"},
 ]
 
 LOKI_ANNOTATIONS = [
     {"name": "Alerte de la sonde", "datasource": LOKI, "enable": True, "iconColor": WARN,
-     "expr": '{service="canary"} | json | event="canary_alert_sent"', "textFormat": "Alerte envoyée à la remédiation : {{service_extracted}} ({{type}})",
+     "expr": '{service="canary"} | json | event="canary_alert_sent"', "textFormat": "Alerte envoyée à la remédiation : {{target_service}} ({{type}})",
      "tagKeys": "", "titleFormat": "Alerte sonde"},
     {"name": "Remédiation lancée", "datasource": LOKI, "enable": True, "iconColor": "#9085e9",
      "expr": '{service="remediation"} | json | event="remediation_step" | state="remediating"', "textFormat": "{{message}}",
      "tagKeys": "", "titleFormat": "Remédiation"},
     {"name": "Reprise prouvée", "datasource": LOKI, "enable": True, "iconColor": GOOD,
-     "expr": '{service="remediation"} | json | event="remediation_step" | state="resolved"', "textFormat": "{{service_extracted}} : {{message}}",
+     "expr": '{service="remediation"} | json | event="remediation_step" | state="resolved"', "textFormat": "{{target_service}} : {{message}}",
      "tagKeys": "", "titleFormat": "Reprise prouvée"},
+]
+
+DETECTOR_ANNOTATIONS = [
+    {"name": "Client bloqué (ML)", "datasource": LOKI, "enable": True, "iconColor": CRIT,
+     "expr": '{service="detector"} | json | event="detector_blocked"',
+     "textFormat": "{{client}} bloqué · service visé {{target_service}} · probabilité {{attack_probability}}",
+     "tagKeys": "", "titleFormat": "Blocage ML"},
 ]
 
 # ───────────────────────────── 1. Reprise autonome ─────────────────────────────
@@ -357,8 +366,8 @@ p.append(table("Incidents sur la période, par service et issue",
                                   "escalated": {"text": "Escaladé", "color": WARN}, "suppressed": {"text": "Bloqué (disjoncteur)", "color": WARN}}}]},
                               {"id": "custom.cellOptions", "value": {"type": "color-text"}}]}]))
 p.append(logs("Déroulé des reprises",
-              "Étapes du moteur (detected → remediating → verifying → resolved). Le service concerné est service_extracted (le champ JSON écrase le label).",
-              '{service="remediation"} | json | event="remediation_step" | line_format "{{.service_extracted}} · {{.state}} · {{.message}}"',
+              "Étapes du moteur (detected → remediating → verifying → resolved). Le service concerné est le champ target_service.",
+              '{service="remediation"} | json | event="remediation_step" | line_format "{{.target_service}} · {{.state}} · {{.message}}"',
               {"h": 9, "w": 15, "x": 9, "y": y}))
 y += 9
 
@@ -441,7 +450,7 @@ y = 0
 p = []
 templating = [
     {"type": "query", "name": "service", "label": "Service", "datasource": LOKI, "query": {"label": "service", "stream": "", "type": 1, "refId": "LokiVariableQueryEditor-VariableQuery"},
-     "definition": "label_values(service)", "multi": True, "includeAll": True, "allValue": "auth|accounts|payments|notifications|audit|remediation|canary|gateway|postgres", "current": {"selected": True, "text": ["All"], "value": ["$__all"]},
+     "definition": "label_values(service)", "multi": True, "includeAll": True, "allValue": "auth|accounts|payments|notifications|audit|remediation|canary|gateway|detector|frontend|postgres", "current": {"selected": True, "text": ["All"], "value": ["$__all"]},
      "refresh": 2, "sort": 1, "hide": 0},
     {"type": "textbox", "name": "recherche", "label": "Texte (filtre de ligne)", "query": "", "current": {"value": "", "text": ""}, "hide": 0},
     {"type": "textbox", "name": "request_id", "label": "request_id (suivi d'une requête)", "query": "", "current": {"value": "", "text": ""}, "hide": 0},
@@ -468,7 +477,7 @@ p.append(timeseries("Connexions par minute, par issue",
                     {"h": 8, "w": 12, "x": 0, "y": y}, unit="short",
                     overrides=fixed_overrides([("Réussies", "Réussies", GOOD), ("Échouées", "Échouées", WARN), ("Bloquées", "Bloquées", CRIT)])))
 p.append(table("Échecs de connexion par IP et identifiant (période)",
-               "Top 10. Attention : les connexions passées par le front Next.js portent toutes l'IP du serveur du front.",
+               "Top 10. Les connexions passées par le front portent toutes l'adresse de son conteneur (10.250.0.10).",
                [target('topk(10, sum by (client_ip, username) (count_over_time({service="auth"} | json | event=~"login_failed|login_blocked" [$__range])))',
                        instant=True, ds=LOKI)],
                {"h": 8, "w": 12, "x": 12, "y": y},
@@ -507,8 +516,88 @@ y += 10
 
 logs_db = dashboard("ra-logs", "Resilience Alpha · Journaux et sécurité",
                     "Loki : volume et niveaux, connexions, passerelle, erreurs critiques, exploration et suivi d'une requête.",
-                    p, ["logs", "securite"], LINKS, templating=templating, refresh="10s", time_from="now-30m")
+                    p, ["logs", "securite"], LINKS, annotations=DETECTOR_ANNOTATIONS, templating=templating, refresh="10s", time_from="now-30m")
 
-for name, d in [("recovery", recovery), ("traffic", traffic), ("logs", logs_db)]:
+
+# ───────────────────────────── 4. Détection ML ─────────────────────────────
+_id = 0
+y = 0
+p = []
+# Une couleur par règle du modèle hybride (palette catégorielle validée, mêmes teintes que les services).
+REASONS = [("forest", "Forêt d'isolement", "#3987e5"), ("bounds", "Bornes", "#d95926"), ("supervised", "Classifieur supervisé", "#199e70")]
+p.append(text_row("État", y)); y += 1
+p.append(stat("Détecteur", 'up{job="detector"} : Prometheus joint le /metrics du détecteur. Arrêté = la passerelle laisse tout passer.',
+              [target('max(up{job="detector"})')], {"h": 4, "w": 4, "x": 0, "y": y},
+              mappings=[{"type": "value", "options": {"0": {"text": "Arrêté", "color": CRIT}, "1": {"text": "Opérationnel", "color": GOOD}}}]))
+p.append(stat("Modèle", "detector_model_loaded : 1 si ml/model/model.joblib est chargé. Sans modèle, le détecteur ne bloque rien.",
+              [target("max(detector_model_loaded)")], {"h": 4, "w": 4, "x": 4, "y": y},
+              mappings=[{"type": "value", "options": {"0": {"text": "Absent", "color": WARN}, "1": {"text": "Chargé", "color": GOOD}}}]))
+p.append(stat("Clients bloqués maintenant", "detector_blocked_clients : clients dont toutes les requêtes reçoivent 403 (10 min par blocage).",
+              [target("sum(detector_blocked_clients)")], {"h": 4, "w": 4, "x": 8, "y": y}, decimals=0,
+              thresholds={"mode": "absolute", "steps": [{"color": "text", "value": None}, {"color": CRIT, "value": 1}]}))
+p.append(stat("Blocages (période)", "increase(detector_blocks_total) sur la période affichée.",
+              [target("sum(increase(detector_blocks_total[$__range]))", instant=True)], {"h": 4, "w": 4, "x": 12, "y": y}, decimals=0, no_value="0"))
+p.append(stat("Requêtes refusées (période)", "Contrôles de la passerelle répondus 403 par le détecteur sur la période.",
+              [target('sum(increase(detector_checks_total{result="blocked"}[$__range]))', instant=True)], {"h": 4, "w": 4, "x": 16, "y": y},
+              decimals=0, no_value="0"))
+p.append(stat("Dernière évaluation", "time() - detector_last_evaluation_timestamp_seconds. Une évaluation toutes les 5 s.",
+              [target("time() - max(detector_last_evaluation_timestamp_seconds)")], {"h": 4, "w": 4, "x": 20, "y": y}, unit="s", decimals=0,
+              thresholds={"mode": "absolute", "steps": [{"color": GOOD, "value": None}, {"color": WARN, "value": 15}, {"color": CRIT, "value": 30}]}))
+y += 4
+
+p.append(text_row("Décisions", y)); y += 1
+p.append(timeseries("Contrôles de la passerelle par seconde, par décision",
+                    "Avant chaque requête, la passerelle interroge le détecteur (auth_request) : autorisée (204) ou refusée (403).",
+                    [target('sum by (result) (rate(detector_checks_total[$__rate_interval]))', "{{result}}")],
+                    {"h": 8, "w": 12, "x": 0, "y": y}, unit="reqps", decimals=2,
+                    overrides=fixed_overrides([("allowed", "Autorisées", NEUTRAL), ("blocked", "Refusées (client bloqué)", CRIT)])))
+p.append(timeseries("Fenêtres anormales par minute, par règle",
+                    "Règle du modèle hybride qui a réagi. Une fenêtre peut déclencher plusieurs règles ; deux fenêtres anormales de suite = blocage.",
+                    [target('sum by (reason) (rate(detector_anomaly_reasons_total[$__rate_interval])) * 60', "{{reason}}")],
+                    {"h": 8, "w": 12, "x": 12, "y": y}, unit="short", decimals=1, bars=True,
+                    overrides=fixed_overrides(REASONS)))
+y += 8
+
+p.append(text_row("Modèle", y)); y += 1
+p.append(timeseries("Score le plus anormal et seuil de la forêt",
+                    "Score d'isolement du client le plus anormal à chaque évaluation (plus bas = plus anormal). Sous le seuil, la règle « forêt » réagit. "
+                    "Pas de point quand aucun client n'a assez de requêtes pour être noté.",
+                    [target("min(detector_min_score)", "Score le plus anormal", "A"), target("max(detector_threshold)", "Seuil", "B")],
+                    {"h": 8, "w": 12, "x": 0, "y": y}, min0=False, decimals=3,
+                    overrides=fixed_overrides([("Score le plus anormal", "Score le plus anormal", "#3987e5"), ("Seuil", "Seuil", NEUTRAL)])))
+p.append(timeseries("Probabilité d'attaque la plus haute",
+                    "Classifieur supervisé : probabilité la plus haute parmi les clients notés. Au-dessus de 50 %, la règle « supervisé » réagit.",
+                    [target("max(detector_max_attack_probability)", "Probabilité", "A"), target("vector(0.5)", "Seuil", "B")],
+                    {"h": 8, "w": 12, "x": 12, "y": y}, unit="percentunit",
+                    overrides=fixed_overrides([("Probabilité", "Probabilité", "#199e70"), ("Seuil", "Seuil (50 %)", NEUTRAL)])))
+y += 8
+p.append(timeseries("Clients notés par évaluation",
+                    "Clients (IP et agent) ayant au moins 3 requêtes dans la fenêtre de 30 s, hors sonde et front.",
+                    [target("max(detector_clients_scored)", "Clients notés")], {"h": 7, "w": 12, "x": 0, "y": y}, decimals=0,
+                    color={"mode": "fixed", "fixedColor": "#3987e5"}))
+p.append(timeseries("Durée d'une évaluation (p95)",
+                    "Lecture des 30 dernières secondes dans Loki + notation. Doit rester bien sous l'intervalle de 5 s.",
+                    [target("histogram_quantile(0.95, sum by (le) (rate(detector_evaluation_seconds_bucket[5m])))", "p95")],
+                    {"h": 7, "w": 12, "x": 12, "y": y}, unit="s", color={"mode": "fixed", "fixedColor": "#3987e5"}))
+y += 7
+
+p.append(text_row("Journal", y)); y += 1
+p.append(logs("Blocages et déblocages",
+              "detector_blocked : client, service visé, probabilité d'attaque et score. detector_unblocked : fin du blocage (expiration ou déblocage manuel).",
+              '{service="detector"} | json | event=~"detector_blocked|detector_unblocked" | line_format '
+              '"{{.event}} · {{.client}}{{if .target_service}} · service visé {{.target_service}} · probabilité {{.attack_probability}} · score {{.score}}{{end}}{{if .reason}} · {{.reason}}{{end}}"',
+              {"h": 9, "w": 12, "x": 0, "y": y}))
+p.append(logs("Fenêtres anormales",
+              "detector_anomaly : chaque fenêtre de 30 s jugée anormale, avec la série en cours (streak) et le volume.",
+              '{service="detector"} | json | event="detector_anomaly" | line_format '
+              '"{{.client}} · série {{.streak}} · {{.requests}} requêtes · probabilité {{.attack_probability}} · score {{.score}}"',
+              {"h": 9, "w": 12, "x": 12, "y": y}))
+y += 9
+
+detection = dashboard("ra-detection", "Resilience Alpha · Détection ML",
+                      "Détecteur hybride (forêt d'isolement + bornes + classifieur supervisé) : état, décisions de la passerelle, scores du modèle, blocages.",
+                      p, ["ml", "securite"], LINKS, annotations=DETECTOR_ANNOTATIONS, refresh="5s", time_from="now-30m")
+
+for name, d in [("recovery", recovery), ("traffic", traffic), ("logs", logs_db), ("detection", detection)]:
     (OUT / f"{name}.json").write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(OUT / f"{name}.json", len(d["panels"]), "panneaux")

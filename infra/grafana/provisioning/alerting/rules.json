@@ -1,0 +1,831 @@
+{
+  "apiVersion": 1,
+  "groups": [
+    {
+      "orgId": 1,
+      "name": "Sécurité",
+      "folder": "Resilience Alpha",
+      "interval": "10s",
+      "rules": [
+        {
+          "uid": "ra-attack-blocked",
+          "title": "Attaque bloquée par le détecteur ML",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (client, target_service) (count_over_time({service=\"detector\"} | json | event=\"detector_blocked\" [1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "Client {{ .Labels.client }} bloqué à la passerelle (service visé : {{ .Labels.target_service }}).",
+            "description": "Le détecteur ML l'a jugé anormal deux évaluations de suite : toutes ses requêtes reçoivent 403 pendant 10 min. Détails (motifs, variables hors bornes) : audit « traffic_blocked » et tableau Détection ML.",
+            "dashboard_url": "http://localhost:3000/d/ra-detection"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-bruteforce",
+          "title": "Force brute sur la connexion",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 180,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (client_ip) (count_over_time({service=\"auth\"} | json | event=~\"login_failed|login_blocked\" [2m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        9
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "{{ printf `%.0f` .Values.B.Value }} échecs de connexion en 2 min depuis {{ .Labels.client_ip }}.",
+            "description": "Le service auth bloque déjà 5 échecs par minute et par IP (429). Vérifier les identifiants visés dans « Journaux et sécurité » (tableau des échecs par IP et identifiant).",
+            "dashboard_url": "http://localhost:3000/d/ra-logs"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-rate-limited",
+          "title": "Limitation de débit déclenchée à la passerelle",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (remote_addr, user_agent) (count_over_time({service=\"gateway\"} | json | __error__=\"\" | status=\"429\" [1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        5
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "{{ printf `%.0f` .Values.B.Value }} requêtes refusées (429) en 1 min pour {{ .Labels.remote_addr }} ({{ .Labels.user_agent }}).",
+            "description": "Rafale sur la connexion au-delà de 10 requêtes par minute : force brute volumétrique probable.",
+            "dashboard_url": "http://localhost:3000/d/ra-logs"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-scan",
+          "title": "Balayage de la passerelle (rafale de 404)",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (remote_addr, user_agent) (count_over_time({service=\"gateway\"} | json | __error__=\"\" | status=\"404\" [1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        30
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "{{ printf `%.0f` .Values.B.Value }} réponses 404 en 1 min pour {{ .Labels.remote_addr }} ({{ .Labels.user_agent }}).",
+            "description": "Recherche de routes cachées. Règle indépendante du ML : elle alerte même si le détecteur est arrêté.",
+            "dashboard_url": "http://localhost:3000/d/ra-logs"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-audit-chain",
+          "title": "Piste d'audit altérée",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 360,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum(count_over_time({service=\"audit\"} | json | event=\"audit_chain_broken\" [5m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "La chaîne de hachage de l'audit est rompue : un événement a été modifié ou supprimé.",
+            "description": "Ne rien redémarrer, conserver les preuves. Vérifier depuis le front (Audit, « Vérifier la chaîne ») ou /api/audit/verify.",
+            "dashboard_url": "http://localhost:3000/d/ra-logs"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-data-inconsistent",
+          "title": "Soldes incohérents avec le ledger",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 60,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "min(canary_data_consistent)",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "10s",
+          "annotations": {
+            "summary": "Le solde d'au moins un compte ne correspond plus à la somme de ses écritures.",
+            "description": "Corruption ou manipulation des données : restauration à partir des écritures requise (PRA).",
+            "dashboard_url": "http://localhost:3000/d/ra-recovery"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-detector-down",
+          "title": "Détecteur ML arrêté",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 60,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "max(up{job=\"detector\"}) or vector(0)",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "30s",
+          "annotations": {
+            "summary": "Le détecteur ML ne répond plus : la passerelle laisse passer tout le trafic (ouverture par défaut).",
+            "description": "Les règles de 404, 429 et force brute continuent d'alerter. Relancer : docker compose up -d detector.",
+            "dashboard_url": "http://localhost:3000/d/ra-detection"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-detector-no-model",
+          "title": "Détecteur ML sans modèle",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "max(detector_model_loaded)",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "1m",
+          "annotations": {
+            "summary": "Le détecteur tourne sans modèle (ml/model/model.joblib absent) : il ne bloque rien.",
+            "description": "Entraîner le modèle (docs/02, section 3.4) puis POST /internal/reload ou docker compose restart detector.",
+            "dashboard_url": "http://localhost:3000/d/ra-detection"
+          },
+          "labels": {
+            "severity": "warning"
+          },
+          "isPaused": false
+        }
+      ]
+    },
+    {
+      "orgId": 1,
+      "name": "Disponibilité",
+      "folder": "Resilience Alpha",
+      "interval": "10s",
+      "rules": [
+        {
+          "uid": "ra-service-down",
+          "title": "Service indisponible",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 60,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "up{job=\"services\"}",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "15s",
+          "annotations": {
+            "summary": "Le service {{ .Labels.service }} ne répond plus.",
+            "description": "La sonde alerte le moteur de remédiation, qui redémarre le conteneur puis prouve la reprise. Une alerte « résolue » suit en général en moins d'une minute.",
+            "dashboard_url": "http://localhost:3000/d/ra-recovery"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-canary-failing",
+          "title": "Paiement de contrôle en échec",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 60,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "min(canary_up)",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "20s",
+          "annotations": {
+            "summary": "La transaction de contrôle (paiement réel via la passerelle) échoue depuis 20 s.",
+            "description": "La plateforme n'est pas utilisable de bout en bout. Voir « Reprise autonome » pour le service en cause.",
+            "dashboard_url": "http://localhost:3000/d/ra-recovery"
+          },
+          "labels": {
+            "severity": "high"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-remediation-failed",
+          "title": "Remédiation en échec",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 180,
+                "to": 0
+              },
+              "datasourceUid": "loki",
+              "model": {
+                "refId": "A",
+                "expr": "sum by (target_service, state) (count_over_time({service=\"remediation\"} | json | event=\"remediation_step\" | state=~\"failed|suppressed\" [2m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200,
+                "queryType": "instant"
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "0s",
+          "annotations": {
+            "summary": "Remédiation de {{ .Labels.target_service }} : {{ .Labels.state }}. Intervention humaine requise.",
+            "description": "failed : service toujours indisponible ou transaction de contrôle en échec après redémarrage. suppressed : disjoncteur ouvert (trop de redémarrages en 10 min).",
+            "dashboard_url": "http://localhost:3000/d/ra-recovery"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
+          "uid": "ra-5xx-rate",
+          "title": "Taux d'erreurs serveur élevé",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 120,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "sum(rate(http_requests_total{service=~\"auth|accounts|payments|notifications|audit\", path!~\"/ready|/health|/metrics\", status=~\"5..\"}[1m])) / sum(rate(http_requests_total{service=~\"auth|accounts|payments|notifications|audit\", path!~\"/ready|/health|/metrics\"}[1m]))",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "gt",
+                      "params": [
+                        0.05
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "1m",
+          "annotations": {
+            "summary": "Plus de 5 % des réponses des services métier sont des erreurs 5xx.",
+            "description": "Voir « Trafic et paiements » (5xx par service) : souvent un service appelé est en panne.",
+            "dashboard_url": "http://localhost:3000/d/ra-traffic"
+          },
+          "labels": {
+            "severity": "warning"
+          },
+          "isPaused": false
+        }
+      ]
+    }
+  ]
+}

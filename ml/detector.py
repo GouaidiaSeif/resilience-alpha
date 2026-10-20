@@ -7,7 +7,7 @@ Boucle (toutes les EVAL_INTERVAL_SECONDS) :
   3. un client anormal PERSIST fois de suite est bloqué BLOCK_TTL_SECONDS ; le moteur de remédiation reçoit une
      alerte « anomaly » (escalade humaine, aucun redémarrage si le service est sain) et l'audit trace le blocage.
 
-La passerelle (variante ml/nginx.detector.conf) interroge GET /internal/check avant chaque requête :
+La passerelle (gateway/nginx.conf) interroge GET /internal/check avant chaque requête :
 403 si le client est bloqué, 204 sinon. Si le détecteur ne répond pas, la passerelle laisse passer (ouverture
 par défaut) : une panne du détecteur ne coupe jamais la plateforme.
 """
@@ -28,7 +28,7 @@ import joblib
 import numpy as np
 from fastapi import APIRouter, Depends, FastAPI, Header, Response
 from prometheus_client import Counter as PCounter
-from prometheus_client import Gauge
+from prometheus_client import Gauge, Histogram
 from pydantic import BaseModel
 
 import loki
@@ -49,18 +49,33 @@ PERSIST = int(env("PERSIST", "2") or 2)
 BLOCK_TTL = float(env("BLOCK_TTL_SECONDS", "600") or 600)
 ALERT_COOLDOWN = float(env("ALERT_COOLDOWN_SECONDS", "600") or 600)
 MIN_REQUESTS = int(env("MIN_REQUESTS", "3") or 3)
-# Jamais bloqués : le serveur du front (tous les utilisateurs de l'interface partagent cette identité) et la sonde.
-ALLOW_UA = re.compile(env("ALLOW_UA_REGEX", r"^(node|resilience-canary/.*)$") or "^$")
+# Jamais bloqués : la sonde et le conteneur du front (tous les utilisateurs de l'interface partagent son adresse).
+# Identifiés par leur adresse (nom ou IP de conteneur), non falsifiable depuis l'extérieur ; l'agent seul ne suffit pas.
+ALLOW_UA = re.compile(env("ALLOW_UA_REGEX", r"^$") or "^$")
 ALLOW_HOSTS = [h for h in (env("ALLOW_HOSTS", "canary") or "").split(",") if h]
 SERVICES = ("auth", "accounts", "payments", "notifications")
 
 EVALS = PCounter("detector_evaluations_total", "Fenêtres client notées")
 ANOMALIES = PCounter("detector_anomalies_total", "Fenêtres client jugées anormales")
-BLOCKS = PCounter("detector_blocks_total", "Clients bloqués")
+REASONS = PCounter("detector_anomaly_reasons_total", "Fenêtres anormales, par règle déclenchée", ["reason"])
+BLOCKS = PCounter("detector_blocks_total", "Clients bloqués, par service visé", ["target_service"])
 CHECKS = PCounter("detector_checks_total", "Contrôles de la passerelle", ["result"])
 BLOCKED = Gauge("detector_blocked_clients", "Clients actuellement bloqués")
 MIN_SCORE = Gauge("detector_min_score", "Score le plus bas de la dernière évaluation (plus bas = plus anormal)")
 MODEL_LOADED = Gauge("detector_model_loaded", "1 si un modèle est chargé")
+THRESHOLD = Gauge("detector_threshold", "Seuil de score de la forêt (sous ce seuil = anormal)")
+MAX_PROBA = Gauge("detector_max_attack_probability", "Probabilité d'attaque la plus haute de la dernière évaluation")
+SCORED = Gauge("detector_clients_scored", "Clients notés à la dernière évaluation")
+LAST_EVAL = Gauge("detector_last_evaluation_timestamp_seconds", "Horodatage de la dernière évaluation")
+EVAL_SECONDS = Histogram("detector_evaluation_seconds", "Durée d'une évaluation (lecture Loki + notation)",
+                         buckets=(0.05, 0.1, 0.25, 0.5, 1, 2, 5))
+# Séries créées à zéro : increase() et les alertes voient le premier blocage, pas seulement le deuxième.
+for _svc in SERVICES:
+    BLOCKS.labels(_svc)
+for _reason in ("forest", "bounds", "supervised"):
+    REASONS.labels(_reason)
+for _result in ("allowed", "blocked"):
+    CHECKS.labels(_result)
 
 
 class State:
@@ -76,6 +91,7 @@ def load_model(st: State) -> None:
     try:
         st.bundle = joblib.load(MODEL_PATH)
         MODEL_LOADED.set(1)
+        THRESHOLD.set(st.bundle["threshold"])
         log_event(log, "detector_model_loaded", path=str(MODEL_PATH), threshold=st.bundle["threshold"], trained_at=st.bundle["trained_at"])
     except FileNotFoundError:
         st.bundle = None
@@ -134,6 +150,7 @@ async def evaluate(app: FastAPI) -> None:
         st.blocked.pop(key)
         log_event(log, "detector_unblocked", client=key, reason="expired")
     BLOCKED.set(len(st.blocked))
+    LAST_EVAL.set(now)
     if st.bundle is None:
         return
 
@@ -155,8 +172,11 @@ async def evaluate(app: FastAPI) -> None:
     for key in list(st.streak):
         if key not in seen:
             st.streak.pop(key)
+    SCORED.set(len(rows))
     if not rows:
-        MIN_SCORE.set(0)
+        # Aucun client noté : pas de valeur (trou dans les courbes) plutôt qu'un 0 qui se lirait comme un score.
+        MIN_SCORE.set(float("nan"))
+        MAX_PROBA.set(float("nan"))
         return
 
     X = np.asarray(rows, dtype=float)
@@ -165,6 +185,7 @@ async def evaluate(app: FastAPI) -> None:
     probas = clf.predict_proba(X)[:, 1] if clf is not None else np.zeros(len(rows))
     EVALS.inc(len(rows))
     MIN_SCORE.set(float(scores.min()))
+    MAX_PROBA.set(float(probas.max()))
     for key, score, proba in zip(keys, scores, probas):
         # Trois règles (modèle hybride) : forêt sous le seuil, variable hors plage normale, classifieur supervisé.
         out = exceeded(feats_by_key[key], st.bundle.get("limits", {}))
@@ -174,6 +195,8 @@ async def evaluate(app: FastAPI) -> None:
             st.streak[key] = 0
             continue
         ANOMALIES.inc()
+        for reason in reasons:
+            REASONS.labels(reason).inc()
         st.streak[key] += 1
         log_event(log, "detector_anomaly", logging.WARNING, client=key, score=round(float(score), 4), streak=st.streak[key],
                   requests=len(by_key[key]), reasons=reasons, exceeded=out, attack_probability=round(float(proba), 3),
@@ -181,9 +204,9 @@ async def evaluate(app: FastAPI) -> None:
         if st.streak[key] >= PERSIST and key not in st.blocked:
             service = target_service(by_key[key])
             st.blocked[key] = {"until": now + BLOCK_TTL, "score": float(score), "service": service, "since": now}
-            BLOCKS.inc()
+            BLOCKS.labels(service).inc()
             BLOCKED.set(len(st.blocked))
-            log_event(log, "detector_blocked", logging.WARNING, client=key, score=round(float(score), 4), service=service,
+            log_event(log, "detector_blocked", logging.WARNING, client=key, score=round(float(score), 4), target_service=service,
                       ttl=BLOCK_TTL, reasons=reasons, exceeded=out, attack_probability=round(float(proba), 3))
             audit("detector", "traffic_blocked", actor=key[:64], outcome="denied", score=round(float(score), 4),
                   service=service, ttl_seconds=BLOCK_TTL, requests=len(by_key[key]), reasons=reasons, exceeded=out,
@@ -197,7 +220,8 @@ async def loop(app: FastAPI) -> None:
         try:
             if tick % 12 == 0:
                 refresh_allowlist(app.state.det)
-            await evaluate(app)
+            with EVAL_SECONDS.time():
+                await evaluate(app)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - la boucle ne doit jamais mourir

@@ -55,6 +55,24 @@
       "keepTime": true,
       "targetBlank": false,
       "tooltip": ""
+    },
+    {
+      "title": "Détection ML",
+      "type": "link",
+      "url": "/d/ra-detection",
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "tooltip": ""
+    },
+    {
+      "title": "Alertes",
+      "type": "link",
+      "url": "/alerting/list",
+      "icon": "bolt",
+      "keepTime": false,
+      "targetBlank": false,
+      "tooltip": "Règles d'alerte (livrées sur Discord)"
     }
   ],
   "annotations": {
@@ -70,6 +88,19 @@
         "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts",
         "type": "dashboard"
+      },
+      {
+        "name": "Client bloqué (ML)",
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "enable": true,
+        "iconColor": "#d03b3b",
+        "expr": "{service=\"detector\"} | json | event=\"detector_blocked\"",
+        "textFormat": "{{client}} bloqué · service visé {{target_service}} · probabilité {{attack_probability}}",
+        "tagKeys": "",
+        "titleFormat": "Blocage ML"
       }
     ]
   },
@@ -92,7 +123,7 @@
         "definition": "label_values(service)",
         "multi": true,
         "includeAll": true,
-        "allValue": "auth|accounts|payments|notifications|audit|remediation|canary|gateway|postgres",
+        "allValue": "auth|accounts|payments|notifications|audit|remediation|canary|gateway|detector|frontend|postgres",
         "current": {
           "selected": true,
           "text": [
@@ -644,7 +675,7 @@
       "type": "table",
       "id": 6,
       "title": "Échecs de connexion par IP et identifiant (période)",
-      "description": "Top 10. Attention : les connexions passées par le front Next.js portent toutes l'IP du serveur du front.",
+      "description": "Top 10. Les connexions passées par le front portent toutes l'adresse de son conteneur (10.250.0.10).",
       "datasource": {
         "type": "loki",
         "uid": "loki"

@@ -1,5 +1,5 @@
 # Image du service « detector ». Contexte de build = racine du dépôt.
-#   docker compose -f docker-compose.yml -f ml/docker-compose.detector.yml up -d --build detector gateway
+#   lancé avec la pile : docker compose up -d --build   (service « detector » de docker-compose.yml)
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

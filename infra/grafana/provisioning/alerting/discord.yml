@@ -1,0 +1,47 @@
+# Livraison des alertes (règles : rules.json, générées par infra/grafana/build_alerts.py) sur un salon Discord.
+#
+# Webhook : Discord > paramètres du salon > Intégrations > Webhooks > Copier l'URL, puis dans .env :
+#   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+# et `docker compose up -d grafana`. Sans URL, les alertes restent visibles dans Grafana (Alertes > Règles)
+# et la livraison échoue sans bloquer le reste.
+apiVersion: 1
+
+templates:
+  - orgId: 1
+    name: resilience-alpha
+    template: |
+      {{ define "ra.severity" }}{{ if eq . "critical" }}critique{{ else if eq . "high" }}élevée{{ else if eq . "warning" }}modérée{{ else }}{{ . }}{{ end }}{{ end }}
+
+      {{ define "ra.title" }}{{ if eq .Status "firing" }}[ALERTE]{{ else }}[RÉSOLU]{{ end }} {{ .CommonLabels.alertname }}{{ if gt (len .Alerts.Firing) 1 }} · {{ len .Alerts.Firing }} en cours{{ end }}{{ end }}
+
+      {{ define "ra.alert" }}**{{ .Annotations.summary }}**
+      {{ if eq .Status "firing" }}{{ .Annotations.description }}
+      Gravité : {{ template "ra.severity" .Labels.severity }} · depuis {{ .StartsAt.Local.Format "02/01 15:04:05" }}{{ else }}Résolu à {{ .EndsAt.Local.Format "15:04:05" }} (début {{ .StartsAt.Local.Format "02/01 15:04:05" }}){{ end }}{{ if .Annotations.dashboard_url }}
+      Tableau : {{ .Annotations.dashboard_url }}{{ end }}{{ end }}
+
+      {{ define "ra.message" }}{{ range .Alerts }}{{ template "ra.alert" . }}
+
+      {{ end }}{{ end }}
+
+contactPoints:
+  - orgId: 1
+    name: Discord
+    receivers:
+      - uid: ra-discord
+        type: discord
+        settings:
+          url: ${DISCORD_WEBHOOK_URL}
+          title: '{{ template "ra.title" . }}'
+          message: '{{ template "ra.message" . }}'
+          use_discord_username: false
+        disableResolveMessage: false
+
+# Toutes les alertes vont sur Discord. Une notification par règle (plusieurs clients bloqués en même temps =
+# un seul message qui les liste) ; rappel toutes les heures tant qu'une alerte reste active.
+policies:
+  - orgId: 1
+    receiver: Discord
+    group_by: [alertname]
+    group_wait: 5s
+    group_interval: 30s
+    repeat_interval: 1h

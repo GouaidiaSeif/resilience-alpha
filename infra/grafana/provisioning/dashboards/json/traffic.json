@@ -54,6 +54,24 @@
       "keepTime": true,
       "targetBlank": false,
       "tooltip": ""
+    },
+    {
+      "title": "Détection ML",
+      "type": "link",
+      "url": "/d/ra-detection",
+      "icon": "dashboard",
+      "keepTime": true,
+      "targetBlank": false,
+      "tooltip": ""
+    },
+    {
+      "title": "Alertes",
+      "type": "link",
+      "url": "/alerting/list",
+      "icon": "bolt",
+      "keepTime": false,
+      "targetBlank": false,
+      "tooltip": "Règles d'alerte (livrées sur Discord)"
     }
   ],
   "annotations": {
@@ -79,7 +97,7 @@
         "enable": true,
         "iconColor": "#fab219",
         "expr": "{service=\"canary\"} | json | event=\"canary_alert_sent\"",
-        "textFormat": "Alerte envoyée à la remédiation : {{service_extracted}} ({{type}})",
+        "textFormat": "Alerte envoyée à la remédiation : {{target_service}} ({{type}})",
         "tagKeys": "",
         "titleFormat": "Alerte sonde"
       },
@@ -105,7 +123,7 @@
         "enable": true,
         "iconColor": "#0ca30c",
         "expr": "{service=\"remediation\"} | json | event=\"remediation_step\" | state=\"resolved\"",
-        "textFormat": "{{service_extracted}} : {{message}}",
+        "textFormat": "{{target_service}} : {{message}}",
         "tagKeys": "",
         "titleFormat": "Reprise prouvée"
       }

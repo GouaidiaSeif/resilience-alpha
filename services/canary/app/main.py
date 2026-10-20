@@ -197,9 +197,9 @@ async def _alert(app: FastAPI, result: dict) -> None:
             await app.state.http.post(
                 f"{REMEDIATION_URL}/internal/alerts", json=payload, headers={"Authorization": f"Bearer {service_token('canary')}"}, timeout=3
             )
-            log_event(log, "canary_alert_sent", service=service, type=payload["type"])
+            log_event(log, "canary_alert_sent", target_service=service, type=payload["type"])
         except httpx.HTTPError as exc:
-            log_event(log, "canary_alert_failed", logging.WARNING, service=service, error=type(exc).__name__)
+            log_event(log, "canary_alert_failed", logging.WARNING, target_service=service, error=type(exc).__name__)
 
 
 async def probe_loop(app: FastAPI) -> None:

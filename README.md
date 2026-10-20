@@ -36,13 +36,13 @@ Les sections 9 (front) et 10 (observabilité) sont écrites pour ceux qui ne tou
 | 7 services Python (auth, accounts, payments, notifications, audit, remediation, canary) | Écrits |
 | `docker-compose.yml`, réseaux cloisonnés, durcissement des conteneurs | Écrits, syntaxe validée (`docker compose config`) |
 | Passerelle Nginx (routage, limitation de débit, en-têtes de sécurité) | Écrite, **WAF à brancher** |
-| Prometheus, Loki, Promtail, Grafana | Câblés ; 3 dashboards provisionnés (section 10.6) |
-| Tests unitaires de la bibliothèque commune | 7 tests, passent |
+| Prometheus, Loki, Promtail, Grafana | Câblés ; 4 dashboards et 12 règles d'alerte provisionnés, alertes livrées sur Discord (sections 10.6 et 10.8) |
+| Tests unitaires de la bibliothèque commune | 8 tests, passent |
 | Parcours de bout en bout (`scripts/smoke.py`) | Exécuté sur une pile Docker réelle le 2026-10-19 : OK |
 | Remédiation autonome (panne → redémarrage → preuve) | Vérifiée sur pile réelle le 2026-10-19 après deux correctifs (`events.py`, proxy Docker) |
-| Front Next.js/Tailwind | Écrit : `frontend/` (voir `frontend/README.md`) |
+| Front Next.js/Tailwind | Écrit : `frontend/`, conteneur `rsl-frontend` lancé avec la pile (voir `frontend/README.md`) |
 | API de supervision pour le tableau de bord | Non nécessaire pour le front : état des services via la passerelle, incidents via l'audit (voir `frontend/README.md`) |
-| Service de détection ML (`detector`) | Écrit, **optionnel** : `ml/` (Isolation Forest + garde-fous, détecteur temps réel, blocage à la passerelle), testé de bout en bout le 2026-10-19. Voir `docs/02-reprise-idempotence-ml.md` §3 |
+| Service de détection ML (`detector`) | Lancé avec la pile : `ml/` (modèle hybride Isolation Forest + bornes + classifieur supervisé, blocage à la passerelle), testé de bout en bout le 2026-10-20. Le modèle s'entraîne sur votre pile (`ml/model/`, hors Git). Voir `docs/02-reprise-idempotence-ml.md` §3 |
 | Assistant RAG (Ollama/LangChain), WAF, SIEM, Vault/SOPS, Ansible | Hors de ce dépôt backend |
 
 Les durées indiquées dans ce document (délais de détection, de reprise) sont déduites du code et des valeurs
@@ -50,7 +50,15 @@ par défaut. Elles n'ont pas été mesurées sur une pile en fonctionnement.
 
 ## 2. Démarrage rapide
 
-Prérequis : Docker Desktop (WSL2) démarré, Python 3.10+ pour les scripts.
+Prérequis : Docker Desktop (WSL2), Python 3.10+ pour les scripts.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start.ps1   # Windows : tout lancer (Linux/macOS : ./scripts/start.sh)
+```
+
+Le script démarre Docker Desktop s'il est arrêté, crée `.env` s'il manque, signale un webhook Discord ou un
+modèle ML absents, construit et lance toute la pile (services, passerelle, détecteur ML, front, observabilité),
+attend les contrôles de santé puis affiche les adresses. Équivalent manuel :
 
 ```bash
 python scripts/gen_env.py                  # crée .env avec des secrets aléatoires (jamais commité)
@@ -62,7 +70,8 @@ python scripts/smoke.py                    # parcours complet : doit finir par "
 
 | Accès | Adresse | Remarque |
 |---|---|---|
-| API (passerelle) | `http://localhost:8080` | Seul port exposé au réseau 192.168.137.0/24 |
+| Front | `http://localhost:3001` | Conteneur `rsl-frontend`. Compte `admin` / `ADMIN_PASSWORD` |
+| API (passerelle) | `http://localhost:8080` | Point d'entrée de l'API, exposé au réseau 192.168.137.0/24 |
 | Grafana | `http://localhost:3000` | Local au PC Hôte. Utilisateur `admin`, mot de passe `GRAFANA_ADMIN_PASSWORD` |
 | PostgreSQL (DBeaver) | `localhost:5432` | **Optionnel**, voir ci-dessous |
 | Prometheus, Loki, services | non publiés | Joignables uniquement depuis les conteneurs |
@@ -102,8 +111,9 @@ Arrêt : `docker compose down`. Remise à zéro complète (efface la base) : `do
 
 | Réseau | Interne ? | Contenu | Rôle |
 |---|---|---|---|
-| `edge` | non | gateway, grafana | Seuls à publier un port |
-| `backend` | **oui** | tous les services, postgres, prometheus, loki, promtail | Pas d'accès Internet, pas de port publié |
+| `edge` | non | gateway, grafana | Publient un port ; Grafana y joint Discord pour les alertes |
+| `web` | non | frontend (adresse fixe `10.250.0.10`), gateway | Le front ne voit que la passerelle ; son adresse fixe est exemptée par le détecteur ML |
+| `backend` | **oui** | tous les services, detector, postgres, prometheus, loki, promtail | Pas d'accès Internet, pas de port publié |
 | `remediation` | **oui** | remediation, docker-proxy-remediation | Isole le seul composant qui touche à Docker |
 | `obs` | **oui** | promtail, docker-proxy-ro | Lecture des conteneurs par Promtail |
 
@@ -130,7 +140,7 @@ compose séparé qui ajoute un réseau dédié.
 
 ```
 resilience-alpha/
-├── docker-compose.yml             # toute la pile (services, réseaux, observabilité)
+├── docker-compose.yml             # toute la pile (services, détecteur ML, front, réseaux, observabilité)
 ├── docker-compose.dbeaver.yml     # option : publie PostgreSQL sur 127.0.0.1:5432
 ├── .env.example                   # modèle de configuration (aucun secret)
 ├── requirements-dev.txt           # dépendances locales : bibliothèque commune + pytest
@@ -138,7 +148,7 @@ resilience-alpha/
 ├── .gitattributes                 # force LF sur .sh/.sql/.yml/.conf (évite "bad interpreter" sous Windows)
 │
 ├── gateway/
-│   └── nginx.conf                 # routage /api/*, limitation de débit du login, logs JSON, en-têtes
+│   └── nginx.conf                 # routage /api/*, contrôle du détecteur ML, limitation de débit du login, logs JSON
 ├── db/init/
 │   ├── 01-roles.sh                # rôles svc_* et schémas (exécuté une seule fois, à la création du volume)
 │   └── 02-schema.sql              # tables, contraintes, droits (GRANT)
@@ -167,8 +177,13 @@ resilience-alpha/
 ├── infra/
 │   ├── prometheus/prometheus.yml  # cibles scrapées toutes les 5 s
 │   ├── promtail/promtail.yml      # collecte des logs des conteneurs vers Loki
-│   └── grafana/provisioning/datasources/datasources.yml   # Prometheus (défaut) + Loki
+│   └── grafana/
+│       ├── build_dashboards.py    # génère les 4 dashboards (provisioning/dashboards/json)
+│       ├── build_alerts.py        # génère les 12 règles d'alerte (provisioning/alerting/rules.json)
+│       └── provisioning/          # sources de données, dashboards, alertes + point de contact Discord
 │
+├── ml/                            # détection ML : entraînement, évaluation, service detector (voir ml/README.md)
+├── frontend/                      # front Next.js (BFF), image Docker frontend/Dockerfile
 ├── scripts/                       # voir section 5
 ├── tests/                         # tests pytest de la bibliothèque commune
 └── docs/api/*.openapi.json        # spécification OpenAPI de chaque service (générée)
@@ -178,6 +193,7 @@ resilience-alpha/
 
 | Fichier | Rôle | Quand l'utiliser |
 |---|---|---|
+| `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images, attend les contrôles de santé, affiche les adresses. | À chaque démarrage. Arrêt : `docker compose down`. |
 | `scripts/gen_env.py` | Crée `.env` depuis `.env.example` en remplaçant chaque `CHANGE_ME` par un secret aléatoire. Stdlib uniquement : pas de venv nécessaire. Refuse d'écraser un `.env` existant sans `--force`. | Une fois, avant le premier `docker compose up`. Après `--force`, faire aussi `docker compose down -v` : les mots de passe de la base changent. |
 | `scripts/smoke.py` | Parcours de bout en bout via la passerelle : inscription, mauvais mot de passe, connexion, API protégée, 2 comptes, paiement, rejeu idempotent, soldes, solde insuffisant, plafond, notification, intégrité de l'audit. Quitte avec un code ≠ 0 au premier échec. Nécessite `httpx`. | Après chaque démarrage, et juste avant la démo. `ADMIN_PASSWORD=... python scripts/smoke.py` ajoute la vérification de la chaîne d'audit. `BASE_URL=http://192.168.137.1:8080` pour le lancer depuis un autre poste. |
 | `scripts/export_openapi.py` | Génère `docs/api/<service>.openapi.json` en important chaque application. Nécessite `pip install -r requirements-dev.txt`. | Après toute modification d'un endpoint. Livrable « documentation d'API ». |
@@ -203,6 +219,9 @@ Cible industrielle : migrer vers Vault ou SOPS.
 | `LOG_LEVEL` | `INFO` | Niveau de log de tous les services |
 | `PAYMENT_MAX_AMOUNT` | `5000` | Plafond d'un paiement |
 | `CANARY_ALERTS_ENABLED` | `true` | Si `false`, la sonde mesure mais n'alerte pas (utile pour tester le détecteur ML seul) |
+| `DISCORD_WEBHOOK_URL` | vide | Webhook du salon Discord qui reçoit les alertes Grafana (secret). Vide = alertes dans Grafana seulement |
+| `TZ` | `Europe/Paris` | Fuseau des heures affichées dans les messages d'alerte |
+| `DETECTOR_BLOCK_TTL_SECONDS` | `600` | Durée d'un blocage par le détecteur ML |
 
 Réglages avancés (variables d'environnement des conteneurs, non listées dans `.env.example`, à ajouter à la
 section `environment` du service concerné dans le compose) :
@@ -688,7 +707,7 @@ conteneurs ──stdout JSON──► Promtail ──► Loki ──► Grafana 
 - Les datasources sont **provisionnées** (`infra/grafana/provisioning/datasources/datasources.yml`) : rien à
   configurer à la main.
 - Les datasources ont des uid fixes (`prometheus`, `loki`) référencés par les dashboards : ne pas les renommer.
-- **Trois dashboards sont provisionnés** dans le dossier Grafana « Resilience Alpha » (détail en 10.6). Leur JSON est
+- **Quatre dashboards sont provisionnés** dans le dossier Grafana « Resilience Alpha » (détail en 10.6). Leur JSON est
   dans `infra/grafana/provisioning/dashboards/json/`, généré par `python infra/grafana/build_dashboards.py`
   (couleurs, libellés et requêtes au même endroit). Grafana recharge les fichiers toutes les 30 s.
 - Les modifications faites dans l'interface ne sont **pas** écrites sur le disque et une régénération les écraserait :
@@ -794,13 +813,14 @@ Les services journalisent aussi `http_request` avec `client_ip`, `path`, `status
 
 ### 10.6 Dashboard « avant / pendant / après » (critère de jury, axe 3)
 
-Le jury doit voir l'état du service avant l'incident, pendant et après la remédiation. Trois dashboards provisionnés,
+Le jury doit voir l'état du service avant l'incident, pendant et après la remédiation. Quatre dashboards provisionnés,
 reliés entre eux par des liens en haut de page :
 
 | Dashboard (uid) | Pour qui | Contenu |
 |---|---|---|
 | **Reprise autonome** (`/d/ra-recovery`) | Jury, démo | Tuiles « maintenant » (paiement de contrôle, temps sans succès, cohérence des données, incidents actifs, reprises prouvées, durée de reprise p95) ; frise d'état par service vue par la sonde (`canary_service_ready`, `canary_up`) et par Prometheus (`up`) ; durée et résultat des sondes ; incidents par service et issue ; déroulé des reprises (Loki). Actualisation 5 s, fenêtre 15 min |
 | **Trafic et paiements** (`/d/ra-traffic`) | Équipe infra | Débit, part de 5xx, latence p95, 4xx/5xx par service (hors `/ready`, `/health`, `/metrics`) ; paiements et notifications par minute ; routes les plus sollicitées |
+| **Détection ML** (`/d/ra-detection`) | Cyber, démo d'attaque | État du détecteur et du modèle ; clients bloqués ; décisions de la passerelle (autorisées / refusées) ; fenêtres anormales par règle (forêt, bornes, supervisé) ; score le plus anormal face au seuil ; probabilité d'attaque ; journal des blocages et des anomalies |
 | **Journaux et sécurité** (`/d/ra-logs`) | Cyber, SIEM | Volume de logs par niveau ; avertissements par service ; connexions réussies / échouées / bloquées et top des IP en échec ; réponses de la passerelle par classe ; trafic hors sonde ; erreurs critiques ; exploration par service et texte ; **suivi d'une requête** par `request_id` (variable en haut) |
 
 **Annotations** (lignes verticales sur les graphiques) : alerte de la sonde, remédiation lancée, reprise prouvée.
@@ -822,6 +842,15 @@ produit dans la page Supervision du front.
   `backend`), puis `docker compose restart prometheus`. Un service qui utilise `create_app()` l'expose déjà.
 - **Cardinalité** : le label `path` des métriques HTTP est un gabarit de route. Ne jamais mettre un identifiant
   d'utilisateur ou un UUID dans un label.
+
+### 10.8 Alertes (livrées sur Discord)
+
+Douze règles Grafana provisionnées, évaluées toutes les 10 s : attaque bloquée par le ML, force brute, limitation
+de débit (429), balayage (404), piste d'audit altérée, soldes incohérents, détecteur arrêté ou sans modèle,
+service indisponible, paiement de contrôle en échec, remédiation en échec, taux de 5xx. Détail, seuils et
+configuration du webhook : `docs/02-reprise-idempotence-ml.md` §3.13. Liste et état dans Grafana : Alertes >
+Règles d'alerte (`/alerting/list`). Modifier une règle : `infra/grafana/build_alerts.py`, puis
+`python infra/grafana/build_alerts.py && docker compose restart grafana`.
 
 ## 11. Scénario d'incident et de reprise
 
@@ -878,7 +907,7 @@ documenter dans le PCA/PRA.
 ## 13. Tests, conventions, dépannage
 
 **Tests** : `pip install -r requirements-dev.txt` puis `PYTHONPATH=libs/common pytest tests` (PowerShell :
-`$env:PYTHONPATH="libs/common"; pytest tests`). Les 7 tests couvrent la bibliothèque commune ; il n'y a pas de test
+`$env:PYTHONPATH="libs/common"; pytest tests`). Les 8 tests couvrent la bibliothèque commune ; il n'y a pas de test
 automatisé des services. `scripts/smoke.py` fait office de test d'intégration manuel.
 
 **Conventions** : événements de log et actions d'audit en `snake_case` ; un nom d'événement = un sens stable (ils

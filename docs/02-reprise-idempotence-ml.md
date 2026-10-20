@@ -12,6 +12,7 @@ sur la pile réelle le 2026-10-19 (pannes provoquées avec `docker stop`, attaqu
 1. [Reprise en cas d'erreur](#1-reprise-en-cas-derreur)
 2. [Idempotence, service par service](#2-idempotence-service-par-service)
 3. [Détection ML (Isolation Forest) et blocage des attaquants](#3-détection-ml-isolation-forest-et-blocage-des-attaquants)
+   — 3.6 comparaison des modèles, 3.7 le ML suffit-il ?, 3.8 détection actuelle, 3.10 pilotage, 3.13 alertes Discord
 
 ---
 
@@ -246,15 +247,16 @@ mais un attaquant qui change d'agent à chaque requête échapperait au blocage 
 Vérification : après une requête du PC Attaquant, `docker logs rsl-gateway --tail 5` doit montrer `192.168.137.x`.
 
 **Test avec un second PC sur le même réseau (configuration prévue).** Sans le proxy ci-dessus, le PC attaquant
-arrivera lui aussi en `172.21.0.1`, comme le front Next.js et vos propres essais. Ce qui reste distinct : l'agent
-utilisateur. Conséquences concrètes pour le test :
+arrivera lui aussi en `172.21.0.1`, comme vos propres essais depuis le PC Hôte. Le front, lui, tourne dans son
+conteneur (`rsl-frontend`, adresse fixe `10.250.0.10`) : il a sa propre identité, exemptée par adresse et non par
+agent, donc impossible à usurper depuis l'extérieur. Conséquences concrètes pour le test :
 
-- le détecteur bloque bien le client `172.21.0.1|<agent de l'outil d'attaque>` sans gêner les autres ;
-- une force brute depuis ce PC déclenche le blocage anti-force brute d'auth **pour tout le monde** (même IP) ;
-- **l'exemption du front repose sur l'agent `node`** : un attaquant qui envoie `User-Agent: node` échappe au
-  détecteur. Correctifs, du plus simple au plus solide : faire tourner le front dans Docker (adresse de conteneur
-  propre, exemptée via `ALLOW_HOSTS`) ; faire envoyer par le front un en-tête secret vérifié par la passerelle ;
-  ou retrouver l'IP réelle (proxy ci-dessus), ce qui règle aussi l'anti-force brute.
+- le détecteur bloque bien le client `172.21.0.1|<agent de l'outil d'attaque>` sans gêner les utilisateurs du
+  front ;
+- une force brute envoyée **directement à la passerelle** depuis ce PC déclenche l'anti-force brute d'auth pour
+  tous les clients extérieurs (même IP), mais pas pour les utilisateurs du front (adresse différente) ;
+- un attaquant qui change d'agent à chaque requête échappe au blocage par client ; seul le retour de l'IP réelle
+  (proxy ci-dessus) le règle, et règle aussi l'anti-force brute.
 
 ### 3.2 Pourquoi un Isolation Forest (et pourquoi il ne suffit pas seul)
 
@@ -300,6 +302,11 @@ ml/.venv/Scripts/pip install -r ml/requirements.txt          # Linux/macOS : ml/
 # 2. Accès à Loki via Grafana (Loki n'est pas publié)
 export LOKI_URL=http://localhost:3000/api/datasources/proxy/uid/loki
 export GRAFANA_USER=admin GRAFANA_PASSWORD=<GRAFANA_ADMIN_PASSWORD du .env>
+
+# Pendant la collecte, arrêter le détecteur (lancé avec la pile) : sinon les attaques simulées sont bloquées
+# (403) au bout de 10 s et les fenêtres étiquetées ne ressemblent plus à l'attaque. Le relancer après l'étape 5 :
+#   docker compose stop detector   …   docker compose start detector
+# (Les règles d'alerte 404 / 429 / force brute enverront des messages Discord pendant la collecte.)
 
 # 3. Constituer une base de trafic NORMAL (sonde + utilisateurs simulés, 10 à 30 min)
 ml/.venv/Scripts/python ml/traffic.py normal --users 8 --duration 900
@@ -414,10 +421,10 @@ ci-dessous (défense en profondeur).
 | canary | Transaction réelle toutes les 5 s | Indisponibilité, régression fonctionnelle | `canary_up`, Grafana « Reprise autonome » |
 | Prometheus | `up`, taux de 5xx, latences | Panne, dégradation | Grafana « Trafic et paiements » |
 | remediation | Liste blanche, disjoncteur, escalade des anomalies | Réaction automatique bornée | Supervision (front), audit `incident_*` |
-| **detector (ML)** | Hybride IF + bornes + supervisé, blocage temporaire | Balayage, énumération, inondation, force brute, bourrage d'identifiants | Audit `traffic_blocked`, logs `detector_*` |
+| **detector (ML)** | Hybride IF + bornes + supervisé, blocage temporaire | Balayage, énumération, inondation, force brute, bourrage d'identifiants | Audit `traffic_blocked`, Grafana « Détection ML » |
+| Alertes Grafana | 12 règles sur Prometheus et Loki, livrées sur Discord (3.13) | Attaque bloquée, force brute, 429, balayage, audit altéré, panne, remédiation en échec | Discord, Grafana « Alertes » |
 
-**Pas encore en place** : WAF (emplacement prévu dans `gateway/nginx.conf`), règles d'alerte Grafana (les
-tableaux existent, aucune alerte n'est configurée), SIEM, TLS.
+**Pas encore en place** : WAF (emplacement prévu dans `gateway/nginx.conf`), SIEM, TLS.
 
 ### 3.9 Détection en temps réel et blocage
 
@@ -444,7 +451,7 @@ anormal **2 fois de suite** est bloqué **10 min** (`BLOCK_TTL_SECONDS`), puis :
   épuiser le disjoncteur de la remédiation (section 1.7) ;
 - logs `detector_anomaly`, `detector_blocked`, `detector_unblocked` dans Loki.
 
-**Blocage à la passerelle** (`ml/nginx.detector.conf`) : avant chaque requête, Nginx appelle
+**Blocage à la passerelle** (`gateway/nginx.conf`, actif par défaut) : avant chaque requête, Nginx appelle
 `GET detector:8000/internal/check` avec l'en-tête `X-Client-Key: $remote_addr|$http_user_agent` (posé par Nginx,
 le client ne peut pas le forger). 204 ⇒ la requête continue ; 403 ⇒ réponse JSON « Accès temporairement
 bloqué ». Deux détails qui comptent :
@@ -456,23 +463,27 @@ bloqué ». Deux détails qui comptent :
   un client bloqué qui balayait des chemins inconnus recevait donc toujours 404. Les emplacements de repli
   utilisent `try_files … @notfound`, exécuté après le contrôle.
 
-**Jamais bloqués** (`ALLOW_UA_REGEX`, `ALLOW_HOSTS`) : le serveur du front (`User-Agent: node` — tous les
-utilisateurs de l'interface partagent cette identité) et la sonde (adresse du conteneur `canary`).
+**Jamais bloqués** (`ALLOW_HOSTS`) : la sonde (conteneur `canary`) et le front (conteneur `rsl-frontend`,
+adresse fixe `10.250.0.10` sur le réseau `web` : tous les utilisateurs de l'interface partagent cette identité).
+L'exemption se fait par **adresse de conteneur**, jamais par agent utilisateur : un `User-Agent` se falsifie,
+une adresse interne Docker non. `ALLOW_UA_REGEX` existe encore mais est vide par défaut.
 
 **Essai de bout en bout** (2026-10-19) : balayage à 6 req/s pendant 70 s + utilisateur connecté en parallèle.
 Balayeur détecté ~10 s après le début et bloqué 5 s plus tard (**≈ 10–15 s au total**), puis 366 réponses 403 ;
 l'utilisateur légitime : 23 réponses 200, aucune gêne ; sonde : `canary_up` resté à 1 ; remédiation :
 `detected → escalated` (« Service sain malgré l'anomalie : aucune action destructive »).
 
-### 3.10 Activer, piloter, désactiver
+### 3.10 Lancer, piloter, désactiver
+
+Le détecteur fait partie de la pile : `scripts/start.ps1` (ou `docker compose up -d --build`) le démarre avec le
+reste, et la passerelle le consulte toujours. Sans `ml/model/model.joblib`, il démarre à vide (aucun blocage) et
+l'alerte « Détecteur ML sans modèle » le signale.
 
 ```bash
-# Activer (après l'entraînement : ml/model/model.joblib doit exister)
-docker compose -f docker-compose.yml -f ml/docker-compose.detector.yml up -d --build detector gateway
-
 # Suivre
-docker compose -f docker-compose.yml -f ml/docker-compose.detector.yml logs -f detector
-# Grafana → Explore → Loki :  {service="detector"} | json | event="detector_blocked"
+docker compose logs -f detector
+# Grafana : tableau « Détection ML » (http://localhost:3000/d/ra-detection)
+# ou Explore → Loki :  {service="detector"} | json | event="detector_blocked"
 
 # Lister les clients bloqués (le détecteur n'est pas exposé : passer par son conteneur, avec un jeton de service)
 docker exec rsl-detector python -c "from resilience_common.security import service_token as t; import httpx; print(httpx.get('http://localhost:8000/internal/blocked', headers={'Authorization': 'Bearer ' + t('remediation')}).json())"
@@ -482,14 +493,20 @@ docker exec rsl-detector python -c "from resilience_common.security import servi
 
 # Recharger un modèle ré-entraîné sans redémarrer : POST /internal/reload (même principe)
 
-# Désactiver : passerelle d'origine, détecteur arrêté
-docker compose up -d gateway
-docker compose -f docker-compose.yml -f ml/docker-compose.detector.yml stop detector
+# Désactiver le blocage : arrêter le détecteur (la passerelle laisse alors tout passer : ouverture par défaut)
+docker compose stop detector        # réactiver : docker compose start detector
 ```
 
-Métriques sur `/metrics` (`detector_blocked_clients`, `detector_blocks_total`, `detector_anomalies_total`,
-`detector_min_score`, `detector_checks_total{result}`) : pour les voir dans Grafana, ajouter la cible
-`detector:8000` à `infra/prometheus/prometheus.yml` quand le détecteur est activé.
+Métriques collectées par Prometheus (cible `detector:8000`) et affichées dans le tableau « Détection ML » :
+
+| Métrique | Contenu |
+|---|---|
+| `detector_model_loaded`, `detector_threshold` | Modèle chargé, seuil de score de la forêt |
+| `detector_checks_total{result}` | Contrôles de la passerelle : `allowed` (204) ou `blocked` (403) |
+| `detector_blocked_clients`, `detector_blocks_total{target_service}` | Clients bloqués maintenant, blocages cumulés |
+| `detector_anomalies_total`, `detector_anomaly_reasons_total{reason}` | Fenêtres anormales, par règle (`forest`, `bounds`, `supervised`) |
+| `detector_min_score`, `detector_max_attack_probability` | Score le plus anormal et probabilité d'attaque la plus haute de la dernière évaluation |
+| `detector_clients_scored`, `detector_evaluation_seconds`, `detector_last_evaluation_timestamp_seconds` | Charge et santé de la boucle d'évaluation |
 
 | Variable du détecteur | Défaut | Rôle |
 |---|---|---|
@@ -498,7 +515,8 @@ Métriques sur `/metrics` (`detector_blocked_clients`, `detector_blocks_total`, 
 | `BLOCK_TTL_SECONDS` | 600 | Durée d'un blocage |
 | `MIN_REQUESTS` | 3 | Clients plus discrets ignorés |
 | `ALERT_COOLDOWN_SECONDS` | 600 | Une alerte de remédiation par service au plus |
-| `ALLOW_UA_REGEX` / `ALLOW_HOSTS` | `^(node\|resilience-canary/.*)$` / `canary` | Jamais bloqués |
+| `ALLOW_HOSTS` | `canary,10.250.0.10` (sonde, front) | Jamais bloqués (nom ou adresse de conteneur) |
+| `ALLOW_UA_REGEX` | vide | Exemption par agent utilisateur : à éviter (falsifiable) |
 
 ### 3.11 Limites et pistes d'amélioration
 
@@ -506,7 +524,7 @@ Métriques sur `/metrics` (`detector_blocked_clients`, `detector_blocks_total`, 
 |---|---|
 | IP réelle masquée par Docker Desktop (3.1) | Proxy sur l'hôte + `realip`, ou hôte Linux |
 | Clé `IP\|User-Agent` contournable (rotation d'agent) | Une fois l'IP réelle disponible, clé = IP ; agréger aussi par compte (`sub` du jeton) |
-| Le front est une seule identité, exemptée | Faire transmettre par le front l'IP et l'agent du navigateur (`X-Forwarded-For` de confiance) |
+| Le front est une seule identité, exemptée (son conteneur) | Faire transmettre par le front l'IP et l'agent du navigateur (`X-Forwarded-For` de confiance) |
 | Liste de blocage en mémoire | La persister (Redis) si le détecteur doit redémarrer pendant une attaque |
 | Modèle figé, petit jeu d'entraînement | Ré-entraînement planifié (ex. chaque nuit sur 24 h) ; surveiller la dérive (`detector_min_score`) |
 | Variables limitées à la passerelle | Ajouter les événements d'auth (`login_failed` par identifiant), les métriques Prometheus, l'heure |
@@ -514,10 +532,49 @@ Métriques sur `/metrics` (`detector_blocked_clients`, `detector_blocks_total`, 
 
 ### 3.12 Déroulé de démonstration conseillé
 
-1. Activer le détecteur (3.10). Ouvrir Grafana « Journaux et sécurité » et le front, page Supervision.
+1. Lancer la pile (`scripts/start.ps1`). Ouvrir Grafana « Détection ML », le front (page Supervision) et le
+   salon Discord des alertes.
 2. Depuis le PC Attaquant : `BASE_URL=http://192.168.137.1:8080 python ml/traffic.py scan --duration 60`.
 3. Montrer : les 404 montent dans Grafana puis deviennent des 403 en ~15 s ; Journal d'audit du front, service
    « Détecteur » : `traffic_blocked` avec les motifs ; Supervision : incident `escalated`, aucun redémarrage ;
-   la sonde reste verte.
+   la sonde reste verte ; Discord : « Attaque bloquée par le détecteur ML » et « Balayage de la passerelle ».
 4. Expliquer la différence avec une panne (section 1) : une panne est réparée puis prouvée ; une attaque est
    bloquée et escaladée, sans effacer les preuves.
+
+### 3.13 Alertes Grafana, livrées sur Discord
+
+Douze règles provisionnées (`infra/grafana/provisioning/alerting/rules.json`, générées par
+`infra/grafana/build_alerts.py`), évaluées toutes les 10 s, sur les mêmes sources que les tableaux. Chaque
+message Discord indique ce qui se passe, la gravité, l'heure et le lien du tableau à ouvrir ; un second message
+signale la résolution.
+
+| Règle | Source | Déclenchement | Gravité |
+|---|---|---|---|
+| Attaque bloquée par le détecteur ML | Loki `detector_blocked` | Un client bloqué (une alerte par client) | critique |
+| Force brute sur la connexion | Loki `login_failed`, `login_blocked` | ≥ 10 échecs en 2 min pour une IP | élevée |
+| Limitation de débit déclenchée à la passerelle | Loki, journal d'accès | > 5 réponses 429 en 1 min pour un client | élevée |
+| Balayage de la passerelle (rafale de 404) | Loki, journal d'accès | > 30 réponses 404 en 1 min pour un client | élevée |
+| Piste d'audit altérée | Loki `audit_chain_broken` | Un événement | critique |
+| Soldes incohérents avec le ledger | Prometheus `canary_data_consistent` | 0 pendant 10 s | critique |
+| Détecteur ML arrêté | Prometheus `up{job="detector"}` | 0 pendant 30 s | élevée |
+| Détecteur ML sans modèle | Prometheus `detector_model_loaded` | 0 pendant 1 min | modérée |
+| Service indisponible | Prometheus `up{job="services"}` | 0 pendant 15 s (un message par service) | élevée |
+| Paiement de contrôle en échec | Prometheus `canary_up` | 0 pendant 20 s | élevée |
+| Remédiation en échec | Loki `remediation_step` | État `failed` ou `suppressed` (disjoncteur) | critique |
+| Taux d'erreurs serveur élevé | Prometheus `http_requests_total` | > 5 % de 5xx pendant 1 min | modérée |
+
+Les règles 404, 429 et force brute ne dépendent pas du ML : elles alertent même détecteur arrêté (défense en
+profondeur, section 3.7).
+
+**Configurer Discord** : salon > Modifier le salon > Intégrations > Webhooks > Nouveau webhook > Copier l'URL,
+puis dans `.env` : `DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...` et `docker compose up -d grafana`.
+L'URL du webhook est un secret (quiconque la possède peut écrire dans le salon) : elle ne vit que dans `.env`.
+Sans URL, les alertes restent visibles dans Grafana (Alertes > Règles d'alerte).
+
+Routage (`provisioning/alerting/discord.yml`) : tout va sur Discord ; une notification par règle (plusieurs
+clients bloqués en même temps = un seul message qui les liste), premier envoi après 5 s, rappel toutes les heures
+tant que l'alerte reste active. Heures affichées dans le fuseau `TZ` de `.env` (Europe/Paris par défaut).
+
+Essai (2026-10-20) : balayage de 40 s, client bloqué 9 s après le début ; « Balayage de la passerelle » envoyé
+à Discord 1 s après le blocage, « Attaque bloquée par le détecteur ML » 3 s après ; livraison acceptée par
+Discord (statut du point de contact sans erreur).

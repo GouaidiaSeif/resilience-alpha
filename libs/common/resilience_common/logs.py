@@ -25,7 +25,8 @@ class JsonFormatter(logging.Formatter):
         }
         fields = getattr(record, "fields", None)
         if fields:
-            payload.update(fields)
+            # Un champ d'événement ne remplace jamais l'en-tête (service émetteur, niveau…) : il devient field_<nom>.
+            payload.update({f"field_{k}" if k in payload else k: v for k, v in fields.items()})
         if record.exc_info:
             payload["exc"] = self.formatException(record.exc_info)
         return json.dumps(payload, default=str, ensure_ascii=False)

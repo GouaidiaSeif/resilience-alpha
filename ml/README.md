@@ -11,17 +11,20 @@ Explications complètes, résultats mesurés et limites : **`docs/02-reprise-ide
 | `compare.py` | Banc d'essai : IF, IF + bornes, ECOD, LOF, One-Class SVM, supervisé, hybrides (docs/02 §3.6) |
 | `evaluate.py` | Taux de détection par attaque et taux de faux positifs |
 | `detector.py` | Service temps réel : note le trafic toutes les 5 s, bloque, alerte la remédiation, trace dans l'audit |
-| `Dockerfile`, `docker-compose.detector.yml`, `nginx.detector.conf` | Déploiement optionnel du détecteur et de la passerelle avec contrôle `auth_request` |
+| `Dockerfile` | Image du détecteur, lancé avec la pile (service `detector` de `docker-compose.yml`) ; la passerelle le consulte avant chaque requête (`auth_request`) |
 
 Démarrage rapide (PC Hôte, PowerShell ou bash) :
 
 ```bash
 python -m venv ml/.venv && ml/.venv/Scripts/pip install -r ml/requirements.txt     # Linux/macOS : ml/.venv/bin/
 export LOKI_URL=http://localhost:3000/api/datasources/proxy/uid/loki GRAFANA_USER=admin GRAFANA_PASSWORD=<.env>
+docker compose stop detector        # pendant la collecte : sinon les attaques simulées sont bloquées (403) et faussent les données
 ml/.venv/Scripts/python ml/traffic.py normal --users 8 --duration 900   # 15 min de trafic légitime
 for a in scan enumeration flood payspam bruteforce; do ml/.venv/Scripts/python ml/traffic.py $a --duration 45; done
 ml/.venv/Scripts/python ml/train.py --since 25m
-docker compose -f docker-compose.yml -f ml/docker-compose.detector.yml up -d --build detector gateway
+docker compose start detector       # recharge model/model.joblib au démarrage
 ```
+
+Suivi : tableau Grafana « Détection ML » (http://localhost:3000/d/ra-detection) et alertes Discord (docs/02 §3.13).
 
 `model/` et `data/` sont ignorés par Git : le modèle est entraîné sur les données de votre propre pile.

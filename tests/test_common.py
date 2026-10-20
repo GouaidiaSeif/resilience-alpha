@@ -46,6 +46,14 @@ def test_json_log_format():
     assert line["service"] == "svc" and line["event"] == "demo" and line["status"] == 200
 
 
+def test_json_log_fields_never_override_header():
+    record = logging.LogRecord("t", logging.WARNING, __file__, 1, "blocked", None, None)
+    record.fields = {"event": "demo", "service": "auth", "level": "INFO"}
+    line = json.loads(JsonFormatter("detector").format(record))
+    assert line["service"] == "detector" and line["level"] == "WARNING"
+    assert line["field_service"] == "auth" and line["field_level"] == "INFO"
+
+
 def test_app_health_metrics_and_access_control():
     app = create_app("unit")
 

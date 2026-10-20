@@ -10,16 +10,23 @@ passerelle (`/api/*`) et n'invente aucune fonctionnalité absente du backend.
 
 ## Démarrage
 
-Prérequis : Node.js 20.9+ et la pile backend démarrée (`docker compose up -d` à la racine).
+Le front fait partie de la pile : `scripts/start.ps1` (ou `docker compose up -d --build` à la racine) construit
+l'image (`frontend/Dockerfile`, sortie Next.js « standalone ») et lance le conteneur `rsl-frontend` sur
+http://localhost:3001 (3000 est pris par Grafana). Dans Docker, il joint la passerelle par `http://gateway:8080`
+sur le réseau `web`, avec l'adresse fixe `10.250.0.10` que le détecteur ML ne bloque jamais.
+
+Développement (rechargement à chaud), pile démarrée :
 
 ```bash
+docker compose stop frontend    # libère le port 3001
 cd frontend
 npm install
 cp .env.example .env.local      # GATEWAY_URL=http://localhost:8080 par défaut
-npm run dev                     # http://localhost:3001 (3000 est pris par Grafana)
+npm run dev                     # http://localhost:3001
 ```
 
-Production : `npm run build && npm run start` (port 3001). Contrôles : `npm run typecheck`, `npm run lint`.
+Hors Docker, le front n'a plus l'adresse exemptée : un usage intensif de l'interface peut être noté par le
+détecteur ML comme n'importe quel client. Contrôles : `npm run typecheck`, `npm run lint`.
 
 Compte administrateur : `admin` / `ADMIN_PASSWORD` du `.env` racine.
 
