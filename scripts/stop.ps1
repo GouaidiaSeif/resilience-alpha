@@ -1,6 +1,7 @@
-﻿# Arrête la plateforme et le relais d'IP réelle. Les données (base, liste des bans) sont conservées.
+﻿# Éteint la plateforme et le relais d'IP réelle, SANS supprimer les conteneurs (docker compose stop) : tout est
+# conservé, historique Grafana compris. Rallumer : demarrer.cmd (ou docker compose start).
 #   powershell -ExecutionPolicy Bypass -File scripts/stop.ps1
-# Remise à zéro complète (efface la base et la liste des bans) : docker compose down -v
+# Supprimer les conteneurs (données gardées) : docker compose down ; tout effacer : docker compose down -v
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
@@ -11,4 +12,4 @@ if (Test-Path $pidFile) {
     Remove-Item $pidFile -Force
     Write-Host "Relais d'IP réelle arrêté."
 }
-docker compose down
+docker compose stop

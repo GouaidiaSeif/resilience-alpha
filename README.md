@@ -222,7 +222,7 @@ resilience-alpha/
 | Fichier | Rôle | Quand l'utiliser |
 |---|---|---|
 | `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images (sans Internet : démarre avec les images existantes), lance le relais d'IP réelle si `EDGE_RELAY=true`, attend les contrôles de santé, affiche les adresses (y compris celles du réseau local). | À chaque démarrage. |
-| `scripts/stop.ps1`, `scripts/stop.sh` | Arrête le relais d'IP réelle puis la pile (`docker compose down`). Base et liste des bans conservées. | En fin de séance. Remise à zéro : `docker compose down -v`. |
+| `scripts/stop.ps1`, `scripts/stop.sh` (`arreter.cmd`) | Éteint le relais d'IP réelle puis la pile **sans supprimer les conteneurs** (`docker compose stop`) : tout est conservé, historique Grafana compris. | En fin de séance. Rallumer : `demarrer.cmd`. Remise à zéro : `docker compose down -v`. |
 | `scripts/edge_relay.py` | Relais TCP sur le PC Hôte : écoute 8080/8443 sur le réseau et transmet l'IP réelle au WAF (PROXY protocol). Le TLS reste terminé par le WAF. Bibliothèque standard uniquement. | Lancé par `start.ps1`/`start.sh` sous Docker Desktop (`EDGE_RELAY=true`). Inutile sous Linux. |
 | `scripts/gen_env.py` | Crée `.env` (configuration, sans secret) depuis `.env.example`. Stdlib uniquement. Refuse d'écraser un `.env` existant sans `--force`. | Automatique (`demarrer.cmd`). |
 | `scripts/secrets.py` | Secrets gardés dans Vault : `show` (identifiants de connexion), `get`, `set` (ex. webhook Discord), `db-creds` (identifiant PostgreSQL temporaire en lecture seule), `token` (interface web). Stdlib uniquement. | Pour se connecter, changer un secret, ouvrir DBeaver. Voir `docs/03-secrets-vault.md`. |
