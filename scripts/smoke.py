@@ -30,7 +30,9 @@ def check(condition: bool, label: str) -> None:
 
 
 def main() -> None:
-    client = httpx.Client(timeout=10)
+    # Un agent par exécution : le modèle ML peut juger anormale cette rafale de requêtes variées (erreurs volontaires
+    # comprises) et bloquer le client 10 min ; une nouvelle exécution est un nouveau client, pas pénalisé par la précédente.
+    client = httpx.Client(timeout=10, headers={"User-Agent": f"resilience-smoke/1.0 (run {uuid.uuid4().hex[:8]})"})
     user, password = f"smoke-{uuid.uuid4().hex[:8]}", "Sm0ke-test-pwd"
 
     r = client.post(url("auth", "/api/auth/register"), json={"username": user, "password": password})

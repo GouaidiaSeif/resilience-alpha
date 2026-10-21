@@ -1,7 +1,7 @@
 name: resilience-alpha
 
 # Réseaux :
-#   edge         Grafana (local uniquement, joint Discord pour les alertes)
+#   edge         Grafana et Vault (publiés en local uniquement) ; Grafana y joint Discord pour les alertes
 #   web          WAF (seul point d'entrée publié) <-> passerelle et front ; adresses fixes du WAF et du front
 #   backend      interne (sans accès Internet) : services, Postgres, observabilité, détecteur ML
 #   remediation  interne : moteur de remédiation <-> proxy Docker restreint, rien d'autre
@@ -20,6 +20,7 @@ networks:
 
 volumes:
   pgdata: {}
+  vault-data: {}      # stockage chiffré de Vault (scellé au repos)
   detector-data: {}   # liste des bans du détecteur (survit aux redémarrages)
 
 x-hardening: &hardening
@@ -28,6 +29,13 @@ x-hardening: &hardening
   security_opt: ["no-new-privileges:true"]
   tmpfs: ["/tmp"]
 
+# Identifiant PostgreSQL temporaire (moteur database de Vault) : utilisateur et mot de passe insérés au démarrage.
+x-db-url: &db-url postgresql://{username}:{password}@postgres:5432/resilience
+
+x-after-vault: &after-vault
+  postgres: {condition: service_healthy}
+  vault-keeper: {condition: service_healthy}
+
 x-healthcheck: &app-healthcheck
   test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/ready', timeout=2)"]
   interval: 5s
@@ -35,13 +43,73 @@ x-healthcheck: &app-healthcheck
   retries: 3
   start_period: 10s
 
+# Aucun secret dans l'environnement : chaque service lit les siens dans Vault au démarrage (resilience_common/vault.py),
+# avec son identité AppRole (/run/vault, écrite par vault-keeper) et une politique limitée à ses propres secrets.
 x-app-env: &app-env
-  JWT_SECRET: ${JWT_SECRET:?requis - lancer python scripts/gen_env.py}
+  VAULT_ADDR: http://vault:8200
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   AUDIT_URL: http://audit:8000
   NOTIFICATIONS_URL: http://notifications:8000
 
 services:
+  # ───────────────────────── secrets (HashiCorp Vault) ─────────────────────────
+  # Mode serveur, stockage persistant (volume vault-data), scellé à chaque démarrage. Interface web et API
+  # d'administration sur http://127.0.0.1:8200 (jeton : .vault/init.json). Voir docs/03-secrets-vault.md.
+  vault:
+    image: hashicorp/vault:2.1.2
+    container_name: rsl-vault
+    restart: unless-stopped
+    command: ["server"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      SKIP_SETCAP: "true"     # pas de mlock sous Docker Desktop (disable_mlock dans vault.hcl)
+      SKIP_CHOWN: "true"
+    volumes:
+      - ./infra/vault/vault.hcl:/vault/config/vault.hcl:ro
+      - vault-data:/vault/file
+    ports: ["127.0.0.1:8200:8200"]
+    networks: [edge, backend]
+    healthcheck:
+      # Répond 200 même scellé ou non initialisé : on vérifie que le processus vit ; le descellement est l'affaire du gardien.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8200/v1/sys/health?sealedcode=200&uninitcode=200&standbyok=true"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Initialise (première fois), descelle, configure Vault, crée les secrets absents (repris de l'ancien .env ou
+  # générés), écrit l'identité AppRole de chaque service, puis redescelle Vault s'il redémarre. infra/vault/keeper.py.
+  vault-keeper:
+    image: python:3.12-slim
+    container_name: rsl-vault-keeper
+    restart: unless-stopped
+    command: ["python", "-u", "/app/keeper.py"]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]          # fichiers de secrets attribués au seul conteneur qui les lit (sous Linux)
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp"]
+    environment:
+      VAULT_ADDR: http://vault:8200
+      KEYS_DIR: /vault-keys
+      # Migration : secrets d'un ancien .env importés dans Vault au premier démarrage (puis inutiles dans .env).
+      LEGACY_JWT_SECRET: ${JWT_SECRET:-}
+      LEGACY_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      LEGACY_CANARY_PASSWORD: ${CANARY_PASSWORD:-}
+      LEGACY_GRAFANA_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      LEGACY_DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+      LEGACY_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:-}
+    volumes:
+      - ./infra/vault/keeper.py:/app/keeper.py:ro
+      - ./.vault:/vault-keys      # clé de descellement, jeton racine, identités AppRole (PC Hôte, jamais dans Git)
+    depends_on: {vault: {condition: service_healthy}}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, sys; sys.exit(0 if os.path.exists('/tmp/ready') else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 60
+    networks: [backend]
+
   # ───────────────────────── données ─────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -50,15 +118,14 @@ services:
     environment:
       POSTGRES_DB: resilience
       POSTGRES_USER: pgadmin
-      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?requis}
-      AUTH_DB_PASSWORD: ${AUTH_DB_PASSWORD:?requis}
-      ACCOUNTS_DB_PASSWORD: ${ACCOUNTS_DB_PASSWORD:?requis}
-      PAYMENTS_DB_PASSWORD: ${PAYMENTS_DB_PASSWORD:?requis}
-      NOTIFICATIONS_DB_PASSWORD: ${NOTIFICATIONS_DB_PASSWORD:?requis}
-      AUDIT_DB_PASSWORD: ${AUDIT_DB_PASSWORD:?requis}
+      # Mot de passe du super-utilisateur, gardé dans Vault (secret/resilience/postgres) ; seul Vault s'en sert ensuite
+      # (moteur database). Les services n'ont plus de mot de passe fixe : identifiants temporaires créés par Vault.
+      POSTGRES_PASSWORD_FILE: /run/vault-rendered/admin_password
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
+      - ./.vault/rendered/postgres:/run/vault-rendered:ro
+    depends_on: {vault-keeper: {condition: service_healthy}}
     networks: [backend]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pgadmin -d resilience"]
@@ -132,9 +199,11 @@ services:
     restart: "no"
     environment:
       <<: *app-env
-      DATABASE_URL: postgresql://svc_auth:${AUTH_DB_PASSWORD}@postgres:5432/resilience
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?requis}
-    depends_on: {postgres: {condition: service_healthy}}
+      VAULT_ROLE: auth
+      VAULT_DB_ROLE: auth
+      DATABASE_URL_TEMPLATE: *db-url
+    depends_on: *after-vault
+    volumes: ["./.vault/approle/auth:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -146,8 +215,11 @@ services:
     restart: "no"
     environment:
       <<: *app-env
-      DATABASE_URL: postgresql://svc_accounts:${ACCOUNTS_DB_PASSWORD}@postgres:5432/resilience
-    depends_on: {postgres: {condition: service_healthy}}
+      VAULT_ROLE: accounts
+      VAULT_DB_ROLE: accounts
+      DATABASE_URL_TEMPLATE: *db-url
+    depends_on: *after-vault
+    volumes: ["./.vault/approle/accounts:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -159,10 +231,13 @@ services:
     restart: "no"
     environment:
       <<: *app-env
-      DATABASE_URL: postgresql://svc_payments:${PAYMENTS_DB_PASSWORD}@postgres:5432/resilience
+      VAULT_ROLE: payments
+      VAULT_DB_ROLE: payments
+      DATABASE_URL_TEMPLATE: *db-url
       ACCOUNTS_URL: http://accounts:8000
       PAYMENT_MAX_AMOUNT: ${PAYMENT_MAX_AMOUNT:-5000}
-    depends_on: {postgres: {condition: service_healthy}}
+    depends_on: *after-vault
+    volumes: ["./.vault/approle/payments:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -174,8 +249,11 @@ services:
     restart: "no"
     environment:
       <<: *app-env
-      DATABASE_URL: postgresql://svc_notifications:${NOTIFICATIONS_DB_PASSWORD}@postgres:5432/resilience
-    depends_on: {postgres: {condition: service_healthy}}
+      VAULT_ROLE: notifications
+      VAULT_DB_ROLE: notifications
+      DATABASE_URL_TEMPLATE: *db-url
+    depends_on: *after-vault
+    volumes: ["./.vault/approle/notifications:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -188,8 +266,11 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-env
-      DATABASE_URL: postgresql://svc_audit:${AUDIT_DB_PASSWORD}@postgres:5432/resilience
-    depends_on: {postgres: {condition: service_healthy}}
+      VAULT_ROLE: audit
+      VAULT_DB_ROLE: audit
+      DATABASE_URL_TEMPLATE: *db-url
+    depends_on: *after-vault
+    volumes: ["./.vault/approle/audit:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -201,10 +282,12 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-env
+      VAULT_ROLE: remediation
       DOCKER_API_URL: http://docker-proxy-remediation:2375
       CANARY_URL: http://canary:8000
       ACCOUNTS_URL: http://accounts:8000
-    depends_on: [docker-proxy-remediation]
+    depends_on: {docker-proxy-remediation: {condition: service_started}, vault-keeper: {condition: service_healthy}}
+    volumes: ["./.vault/approle/remediation:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend, remediation]    # PAS sur edge : jamais joignable depuis l'extérieur
 
@@ -219,9 +302,10 @@ services:
       GATEWAY_URL: http://gateway:8080
       ACCOUNTS_URL: http://accounts:8000
       REMEDIATION_URL: http://remediation:8000
-      CANARY_PASSWORD: ${CANARY_PASSWORD:?requis}
+      VAULT_ROLE: canary
       CANARY_ALERTS_ENABLED: ${CANARY_ALERTS_ENABLED:-true}
-    depends_on: [gateway]
+    depends_on: {gateway: {condition: service_started}, vault-keeper: {condition: service_healthy}}
+    volumes: ["./.vault/approle/canary:/run/vault:ro"]   # identité AppRole du service
     healthcheck: *app-healthcheck
     networks: [backend]
 
@@ -236,7 +320,8 @@ services:
     <<: *hardening
     restart: unless-stopped
     environment:
-      JWT_SECRET: ${JWT_SECRET:?requis - lancer python scripts/gen_env.py}
+      VAULT_ADDR: http://vault:8200
+      VAULT_ROLE: detector
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUDIT_URL: http://audit:8000
       LOKI_URL: http://loki:3100
@@ -251,7 +336,8 @@ services:
     volumes:
       - ./ml/model:/app/model:ro
       - detector-data:/data
-    depends_on: [loki]
+      - ./.vault/approle/detector:/run/vault:ro
+    depends_on: {loki: {condition: service_started}, vault-keeper: {condition: service_healthy}}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 5s
@@ -271,7 +357,6 @@ services:
     restart: unless-stopped
     environment:
       GATEWAY_URL: http://gateway:8080
-    ports: ["127.0.0.1:3001:3001"]     # accès direct local (débogage) ; le réseau passe par le WAF (https://…:8443)
     depends_on: [gateway]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/bff/ping').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
@@ -342,15 +427,14 @@ services:
     container_name: rsl-grafana
     restart: unless-stopped
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?requis}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/vault-rendered/admin_password    # secret/resilience/grafana (Vault)
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_SERVER_ROOT_URL: http://localhost:3000          # liens « voir dans Grafana » des alertes Discord
-      # Alertes (infra/grafana/provisioning/alerting) livrées sur Discord. Sans URL dans .env, Grafana refuserait de
-      # démarrer (point de contact invalide) : adresse locale sans destinataire, les alertes restent dans Grafana.
-      DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-http://127.0.0.1:9/discord-non-configure}
       TZ: ${TZ:-Europe/Paris}
     ports: ["127.0.0.1:3000:3000"]     # visible uniquement depuis le PC Hôte (jury)
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
-    depends_on: [prometheus, loki]
+      # Mot de passe admin et webhook Discord, rendus depuis Vault par vault-keeper (Grafana ne lit pas Vault).
+      - ./.vault/rendered/grafana:/run/vault-rendered:ro
+    depends_on: {prometheus: {condition: service_started}, loki: {condition: service_started}, vault-keeper: {condition: service_healthy}}
     networks: [edge, backend]

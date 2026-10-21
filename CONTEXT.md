@@ -213,3 +213,17 @@ Line endings: `.gitattributes` forces LF on sh/sql/yml/conf/py. CRLF on `01-role
   - One-click: `demarrer.cmd` / `arreter.cmd` at repo root (Windows double-click). start.ps1 checks Docker and
     Python 3.10+ first. Fresh-clone test (clean copy, new .env, project `rafresh`) passed after fixing: empty
     DISCORD_WEBHOOK_URL made Grafana crash-loop (now defaults to a dead local URL). 35/35, 11/11, smoke OK.
+
+- 2026-10-21: HashiCorp Vault 2.1.2 (server mode, raft, volume vault-data, UI 127.0.0.1:8200). `vault-keeper`
+  (infra/vault/keeper.py, stdlib, python:3.12-slim) inits (1 share, keys in `.vault/init.json`, gitignored),
+  unseals (and re-unseals after Vault restarts, every 5 s), configures KV v2 `secret/resilience/{shared,auth,canary,
+  grafana,postgres}`, AppRole per service (policy = own paths only, token_period 1h, secret_id rotated each start,
+  files `.vault/approle/<svc>/` mounted at /run/vault), database engine (dynamic users `v-approle-<svc>-…`
+  IN ROLE svc_<svc>, 1h renewed, revoked on stop; `readonly` role for DBeaver), audit device to stdout.
+  Renders `.vault/rendered/{postgres,grafana}` (POSTGRES_PASSWORD_FILE, GF_..._FILE, Discord via `$__file{}`).
+  Services: `resilience_common/vault.py` called by create_app (sets env JWT_SECRET etc., DATABASE_URL from
+  DATABASE_URL_TEMPLATE), no secrets in compose/.env. Migration imports LEGACY_* from old .env once; svc_* roles
+  become NOLOGIN. User's .env stripped (backup `.vault/env-avant-vault.bak`); DB backup in session scratchpad.
+  `scripts/secrets.py show|get|set|db-creds|token`. Port 3001 no longer published. smoke.py uses a per-run UA
+  (ML used to block the 2nd run). Alert 15 "Vault scellé ou arrêté". Doc: docs/03-secrets-vault.md. 16 pytest.
+  Bug found: Vault init response key is `keys_base64` (raw response now saved before parsing).

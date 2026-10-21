@@ -16,8 +16,7 @@ if [ ! -f .env ]; then
   echo "Aucun .env : génération des secrets..."
   "$PY" scripts/gen_env.py
 fi
-grep -Eq '^DISCORD_WEBHOOK_URL=[^[:space:]]+' .env \
-  || echo "Attention : DISCORD_WEBHOOK_URL vide dans .env, les alertes resteront visibles dans Grafana, sans message Discord." >&2
+mkdir -p .vault   # clés et identités Vault (créé ici pour en rester propriétaire, pas root)
 [ -f ml/model/model.joblib ] \
   || echo "Attention : ml/model/model.joblib absent (normalement fourni par le dépôt : git pull), le détecteur ML démarre sans modèle et ne bloque rien." >&2
 
@@ -58,8 +57,12 @@ cat <<'EOF'
 
 Application      https://localhost:8443       (certificat autosigné : accepter l'avertissement)
 API              https://localhost:8443/api   (ou http://localhost:8080/api)
-Grafana          http://localhost:3000        (admin / GRAFANA_ADMIN_PASSWORD dans .env)
+Grafana          http://localhost:3000
 WAF et bans      http://localhost:3000/d/ra-waf   ·  Sécurité : https://localhost:8443/admin/security
 Détection ML     http://localhost:3000/d/ra-detection
 Alertes          http://localhost:3000/alerting/list
+Vault            http://127.0.0.1:8200        (jeton : python scripts/secrets.py token)
+
+Identifiants (gardés dans Vault) :
 EOF
+"$PY" scripts/secrets.py show

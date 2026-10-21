@@ -292,7 +292,7 @@ ml/.venv/Scripts/pip install -r ml/requirements.txt          # Linux/macOS : ml/
 
 # 2. Accès à Loki via Grafana (Loki n'est pas publié)
 export LOKI_URL=http://localhost:3000/api/datasources/proxy/uid/loki
-export GRAFANA_USER=admin GRAFANA_PASSWORD=<GRAFANA_ADMIN_PASSWORD du .env>
+export GRAFANA_USER=admin GRAFANA_PASSWORD=$(python scripts/secrets.py get grafana admin_password)
 
 # Pendant la collecte, arrêter le détecteur (lancé avec la pile) : sinon les attaques simulées sont bloquées
 # (403) au bout de 10 s et les fenêtres étiquetées ne ressemblent plus à l'attaque. Le relancer après l'étape 5 :
@@ -488,7 +488,7 @@ docker compose logs -f detector
 # Bans et clients bloqués : front, Administration > Sécurité (https://localhost:8443/admin/security), ou l'API
 # d'administration (rôle admin) par le WAF :
 TOKEN=$(curl -sk https://localhost:8443/api/auth/login -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<ADMIN_PASSWORD>"}' | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+  -d "{\"username\":\"admin\",\"password\":\"$(python scripts/secrets.py get auth admin_password)\"}" | python -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
 curl -sk https://localhost:8443/api/security/bans   -H "Authorization: Bearer $TOKEN"     # IP bannies
 curl -sk https://localhost:8443/api/security/blocks -H "Authorization: Bearer $TOKEN"     # clients bloqués par le ML
 curl -sk -X POST https://localhost:8443/api/security/bans -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -584,8 +584,9 @@ Les règles WAF, 404, 429 et force brute ne dépendent pas du ML : elles alerten
 profondeur, section 3.7).
 
 **Configurer Discord** : salon > Modifier le salon > Intégrations > Webhooks > Nouveau webhook > Copier l'URL,
-puis dans `.env` : `DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...` et `docker compose up -d grafana`.
-L'URL du webhook est un secret (quiconque la possède peut écrire dans le salon) : elle ne vit que dans `.env`.
+puis `python scripts/secrets.py set grafana discord_webhook_url https://discord.com/api/webhooks/...` et
+`docker compose restart grafana`. L'URL du webhook est un secret (quiconque la possède peut écrire dans le salon) :
+elle est gardée dans Vault (`secret/resilience/grafana`), jamais dans `.env` ni dans Git (docs/03).
 Sans URL, les alertes restent visibles dans Grafana (Alertes > Règles d'alerte).
 
 Routage (`provisioning/alerting/discord.yml`) : tout va sur Discord ; une notification par règle (plusieurs
@@ -601,8 +602,7 @@ Discord (statut du point de contact sans erreur).
 **Place dans l'architecture** : le WAF (`rsl-waf`, image `owasp/modsecurity-crs:4.25.2-nginx-alpine-…-lts`,
 version épinglée) est le **seul** composant publié. Il termine le TLS (certificat autosigné généré par l'image),
 applique les règles, la limite de débit par IP et le contrôle de la liste des bans, puis confie `/api/*` à la
-passerelle et les pages au front. La passerelle n'est plus publiée ; le front ne l'est qu'en local
-(`127.0.0.1:3001`, débogage). Configuration dans `waf/` :
+passerelle et les pages au front. Ni la passerelle ni le front ne sont publiés. Configuration dans `waf/` :
 
 | Fichier | Rôle |
 |---|---|

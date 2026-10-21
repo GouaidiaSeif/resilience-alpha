@@ -109,6 +109,12 @@ security = [
 ]
 
 availability = [
+    rule("ra-vault-sealed", "Vault scellé ou arrêté", PROM,
+         "min(vault_core_unsealed) or vector(0)", "lt", 1,
+         "Vault est scellé ou injoignable : un service qui redémarre ne peut plus lire ses secrets.",
+         "vault-keeper le descelle automatiquement en moins de 5 s ; si l'alerte dure, vérifier "
+         "« docker compose logs vault-keeper » et la présence de .vault/init.json (clé de descellement).",
+         "critical", "ra-recovery", for_="30s", window=60),
     rule("ra-service-down", "Service indisponible", PROM,
          'up{job="services"}', "lt", 1,
          "Le service {{ .Labels.service }} ne répond plus.",

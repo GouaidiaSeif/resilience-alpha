@@ -693,6 +693,73 @@
       "interval": "10s",
       "rules": [
         {
+          "uid": "ra-vault-sealed",
+          "title": "Vault scellé ou arrêté",
+          "condition": "C",
+          "data": [
+            {
+              "refId": "A",
+              "relativeTimeRange": {
+                "from": 60,
+                "to": 0
+              },
+              "datasourceUid": "prometheus",
+              "model": {
+                "refId": "A",
+                "expr": "min(vault_core_unsealed) or vector(0)",
+                "instant": true,
+                "range": false,
+                "intervalMs": 1000,
+                "maxDataPoints": 43200
+              }
+            },
+            {
+              "refId": "B",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "B",
+                "type": "reduce",
+                "expression": "A",
+                "reducer": "last",
+                "settings": {
+                  "mode": "dropNN"
+                }
+              }
+            },
+            {
+              "refId": "C",
+              "datasourceUid": "__expr__",
+              "model": {
+                "refId": "C",
+                "type": "threshold",
+                "expression": "B",
+                "conditions": [
+                  {
+                    "evaluator": {
+                      "type": "lt",
+                      "params": [
+                        1
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ],
+          "noDataState": "OK",
+          "execErrState": "KeepLast",
+          "for": "30s",
+          "annotations": {
+            "summary": "Vault est scellé ou injoignable : un service qui redémarre ne peut plus lire ses secrets.",
+            "description": "vault-keeper le descelle automatiquement en moins de 5 s ; si l'alerte dure, vérifier « docker compose logs vault-keeper » et la présence de .vault/init.json (clé de descellement).",
+            "dashboard_url": "http://localhost:3000/d/ra-recovery"
+          },
+          "labels": {
+            "severity": "critical"
+          },
+          "isPaused": false
+        },
+        {
           "uid": "ra-service-down",
           "title": "Service indisponible",
           "condition": "C",

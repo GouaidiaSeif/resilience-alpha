@@ -8,3 +8,6 @@ __pycache__/
 
 # Fichiers d'exécution locaux (PID et journal du relais d'IP réelle)
 .run/
+
+# Vault : clé de descellement, jeton racine, identités AppRole et fichiers rendus (PC Hôte uniquement)
+.vault/

@@ -18,3 +18,9 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - {targets: ["detector:8000"], labels: {service: detector}}
+
+  - job_name: vault
+    metrics_path: /v1/sys/metrics
+    params: {format: [prometheus]}
+    static_configs:
+      - {targets: ["vault:8200"], labels: {service: vault}}

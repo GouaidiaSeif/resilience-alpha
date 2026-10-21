@@ -8,6 +8,7 @@ Ce document s'adresse à toute l'équipe : backend, front React, Grafana/Prometh
 
 Documents détaillés : `docs/01-donnees-et-services.md` (structure des tables, fonctionnement de chaque service,
 Swagger), `docs/02-reprise-idempotence-ml.md` (reprise sur erreur, idempotence, détection ML et blocage),
+`docs/03-secrets-vault.md` (secrets dans HashiCorp Vault),
 `docs/api/index.html` (visionneuse Swagger : `python -m http.server 8088 --directory docs/api`).
 Les sections 9 (front) et 10 (observabilité) sont écrites pour ceux qui ne touchent pas au Python.
 
@@ -37,14 +38,15 @@ Les sections 9 (front) et 10 (observabilité) sont écrites pour ceux qui ne tou
 | `docker-compose.yml`, réseaux cloisonnés, durcissement des conteneurs | Écrits, syntaxe validée (`docker compose config`) |
 | WAF (ModSecurity + OWASP CRS 4.25 LTS) devant la passerelle : TLS, IP réelle, limite par IP, liste des bans | En place, testé le 2026-10-20 : injections et scanners bloqués, parcours complet du front sans faux positif (section 12, docs/02 §3.14) |
 | Passerelle Nginx (routage, limitation de débit, en-têtes de sécurité, contrôle du détecteur ML) | Écrite, derrière le WAF |
-| Prometheus, Loki, Promtail, Grafana | Câblés ; 5 dashboards et 14 règles d'alerte provisionnés, alertes livrées sur Discord (sections 10.6 et 10.8) |
+| Prometheus, Loki, Promtail, Grafana | Câblés ; 5 dashboards et 15 règles d'alerte provisionnés, alertes livrées sur Discord (sections 10.6 et 10.8) |
 | Tests unitaires (bibliothèque commune, liste des bans) | 12 tests, passent |
 | Parcours de bout en bout (`scripts/smoke.py`) | Exécuté sur une pile Docker réelle le 2026-10-19 : OK |
 | Remédiation autonome (panne → redémarrage → preuve) | Vérifiée sur pile réelle le 2026-10-19 après deux correctifs (`events.py`, proxy Docker) |
 | Front Next.js/Tailwind | Écrit : `frontend/`, conteneur `rsl-frontend` lancé avec la pile (voir `frontend/README.md`) |
 | API de supervision pour le tableau de bord | Non nécessaire pour le front : état des services via la passerelle, incidents via l'audit (voir `frontend/README.md`) |
 | Service de détection ML (`detector`) | Lancé avec la pile : `ml/` (modèle hybride Isolation Forest + bornes + classifieur supervisé, blocage à la passerelle), testé de bout en bout le 2026-10-20. Modèle entraîné et données d'entraînement publiés (`ml/model/`, `ml/data/train.jsonl`) : rien à entraîner pour lancer la pile. Voir `docs/02-reprise-idempotence-ml.md` §3 |
-| Assistant RAG (Ollama/LangChain), SIEM, Vault/SOPS, Ansible | Hors de ce dépôt backend |
+| Secrets dans HashiCorp Vault : identité et politique par service, identifiants PostgreSQL temporaires, audit, descellement automatique | En place, testé le 2026-10-21 (migration de la base existante, redémarrage de Vault, remédiation) : `docs/03-secrets-vault.md` |
+| Assistant RAG (Ollama/LangChain), SIEM, Ansible | Hors de ce dépôt backend |
 
 Les durées indiquées dans ce document (délais de détection, de reprise) sont déduites du code et des valeurs
 par défaut. Elles n'ont pas été mesurées sur une pile en fonctionnement.
@@ -62,28 +64,34 @@ powershell -ExecutionPolicy Bypass -File scripts/start.ps1   # Windows (Linux/ma
 ```
 
 Premier lancement sur un poste : 5 à 10 min (construction des images), puis moins d'une minute. Le pare-feu
-Windows demande d'autoriser `python` (relais d'IP réelle) : accepter sur les réseaux privés. Pour recevoir les
-alertes sur Discord, renseigner `DISCORD_WEBHOOK_URL` dans le `.env` généré (facultatif).
+Windows demande d'autoriser `python` (relais d'IP réelle) : accepter sur les réseaux privés.
 
-Le script démarre Docker Desktop s'il est arrêté, crée `.env` s'il manque, signale un webhook Discord ou un
-modèle ML absents, construit et lance toute la pile (services, passerelle, détecteur ML, front, observabilité),
-attend les contrôles de santé puis affiche les adresses. Équivalent manuel :
+Le script démarre Docker Desktop s'il est arrêté, crée `.env` (configuration, sans secret) s'il manque, construit
+et lance toute la pile, attend les contrôles de santé, puis affiche les adresses et **les identifiants de
+connexion**. Au premier lancement, **Vault** génère tous les secrets (clé JWT, mots de passe) ; ensuite :
 
 ```bash
-python scripts/gen_env.py                  # crée .env avec des secrets aléatoires (jamais commité)
-docker compose up -d --build               # construit et démarre toute la pile
+python scripts/secrets.py show             # identifiants du front et de Grafana (gardés dans Vault)
+python scripts/secrets.py set grafana discord_webhook_url https://discord.com/api/webhooks/...   # alertes Discord (facultatif)
+```
+
+Équivalent manuel :
+
+```bash
+python scripts/gen_env.py                  # crée .env (configuration, sans secret ; jamais commité)
+docker compose up -d --build               # construit et démarre toute la pile (Vault compris)
 docker compose ps                          # attendre que tout soit "healthy"
 pip install httpx                          # dépendance du script de test (idéalement dans un venv)
-python scripts/smoke.py                    # parcours complet : doit finir par "Tout est OK."
+ADMIN_PASSWORD=$(python scripts/secrets.py get auth admin_password) python scripts/smoke.py   # doit finir par "Tout est OK."
 ```
 
 | Accès | Adresse | Remarque |
 |---|---|---|
-| Application (front) | `https://localhost:8443` | Par le WAF ; certificat autosigné (accepter l'avertissement). Compte `admin` / `ADMIN_PASSWORD`. Depuis un autre poste : `https://192.168.137.1:8443` |
+| Application (front) | `https://localhost:8443` | Par le WAF ; certificat autosigné (accepter l'avertissement). Compte `admin` (mot de passe : `python scripts/secrets.py show`). Depuis un autre poste : `https://192.168.137.1:8443` |
 | API | `https://localhost:8443/api/…` ou `http://localhost:8080/api/…` | Par le WAF (seul composant publié), puis la passerelle |
 | Sécurité (liste des bans) | `https://localhost:8443/admin/security` | Rôle admin : bannir, débannir, clients bloqués par le ML |
-| Front en direct | `http://127.0.0.1:3001` | Local uniquement, pour le débogage (sans WAF) |
-| Grafana | `http://localhost:3000` | Local au PC Hôte. Utilisateur `admin`, mot de passe `GRAFANA_ADMIN_PASSWORD` |
+| Grafana | `http://localhost:3000` | Local au PC Hôte. Utilisateur `admin`, mot de passe : `python scripts/secrets.py show` |
+| Vault | `http://127.0.0.1:8200` | Local au PC Hôte. Interface web, méthode « Token » : `python scripts/secrets.py token` |
 | PostgreSQL (DBeaver) | `localhost:5432` | **Optionnel**, voir ci-dessous |
 | Prometheus, Loki, services | non publiés | Joignables uniquement depuis les conteneurs |
 
@@ -93,10 +101,11 @@ Accès DBeaver / psql à la base (port lié à `127.0.0.1` uniquement) :
 docker compose -f docker-compose.yml -f docker-compose.dbeaver.yml up -d
 ```
 
-Base `resilience`, utilisateur `pgadmin`, mot de passe `POSTGRES_ADMIN_PASSWORD`. Pour refermer l'accès, relancer
-`docker compose up -d` sans le second fichier.
+Base `resilience`, identifiants **temporaires en lecture seule** délivrés par Vault (valables 1 h, puis supprimés) :
+`python scripts/secrets.py db-creds`. Pour refermer l'accès, relancer `docker compose up -d` sans le second fichier.
 
-Arrêt : `docker compose down`. Remise à zéro complète (efface la base) : `docker compose down -v`.
+Arrêt : `arreter.cmd` ou `docker compose down`. Remise à zéro complète (base, bans, Vault) : `docker compose down -v`
+puis supprimer le dossier `.vault/`.
 
 ## 3. Architecture
 
@@ -126,9 +135,9 @@ Arrêt : `docker compose down`. Remise à zéro complète (efface la base) : `do
 
 | Réseau | Interne ? | Contenu | Rôle |
 |---|---|---|---|
-| `edge` | non | grafana | Publie Grafana en local ; Grafana y joint Discord pour les alertes |
+| `edge` | non | grafana, vault | Publient Grafana et Vault en local (127.0.0.1) ; Grafana y joint Discord pour les alertes |
 | `web` | non | waf (`10.250.0.5`), frontend (`10.250.0.10`), gateway | Le WAF publie 8080/8443 ; le front ne voit que la passerelle ; adresses fixes (confiance realip, exemptions du détecteur) |
-| `backend` | **oui** | tous les services, detector, postgres, prometheus, loki, promtail | Pas d'accès Internet, pas de port publié |
+| `backend` | **oui** | tous les services, detector, vault, vault-keeper, postgres, prometheus, loki, promtail | Pas d'accès Internet, pas de port publié |
 | `remediation` | **oui** | remediation, docker-proxy-remediation | Isole le seul composant qui touche à Docker |
 | `obs` | **oui** | promtail, docker-proxy-ro | Lecture des conteneurs par Promtail |
 
@@ -179,6 +188,7 @@ resilience-alpha/
 │       ├── metrics.py             # compteurs et histogrammes HTTP
 │       ├── events.py              # audit() et notify() : émission d'événements
 │       ├── db.py                  # pool asyncpg restreint au schéma du service
+│       ├── vault.py               # secrets lus dans Vault au démarrage (AppRole), identifiant PostgreSQL temporaire
 │       └── config.py              # lecture des variables d'environnement
 │
 ├── services/
@@ -192,11 +202,12 @@ resilience-alpha/
 │   └── canary/app/main.py         # sonde : transaction réelle de bout en bout
 │
 ├── infra/
+│   ├── vault/vault.hcl, keeper.py # Vault (mode serveur) et son gardien : init, descellement, configuration (docs/03)
 │   ├── prometheus/prometheus.yml  # cibles scrapées toutes les 5 s
 │   ├── promtail/promtail.yml      # collecte des logs des conteneurs vers Loki
 │   └── grafana/
 │       ├── build_dashboards.py    # génère les 5 dashboards (provisioning/dashboards/json)
-│       ├── build_alerts.py        # génère les 14 règles d'alerte (provisioning/alerting/rules.json)
+│       ├── build_alerts.py        # génère les 15 règles d'alerte (provisioning/alerting/rules.json)
 │       └── provisioning/          # sources de données, dashboards, alertes + point de contact Discord
 │
 ├── ml/                            # détection ML : entraînement, évaluation, service detector (voir ml/README.md)
@@ -213,8 +224,9 @@ resilience-alpha/
 | `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images (sans Internet : démarre avec les images existantes), lance le relais d'IP réelle si `EDGE_RELAY=true`, attend les contrôles de santé, affiche les adresses (y compris celles du réseau local). | À chaque démarrage. |
 | `scripts/stop.ps1`, `scripts/stop.sh` | Arrête le relais d'IP réelle puis la pile (`docker compose down`). Base et liste des bans conservées. | En fin de séance. Remise à zéro : `docker compose down -v`. |
 | `scripts/edge_relay.py` | Relais TCP sur le PC Hôte : écoute 8080/8443 sur le réseau et transmet l'IP réelle au WAF (PROXY protocol). Le TLS reste terminé par le WAF. Bibliothèque standard uniquement. | Lancé par `start.ps1`/`start.sh` sous Docker Desktop (`EDGE_RELAY=true`). Inutile sous Linux. |
-| `scripts/gen_env.py` | Crée `.env` depuis `.env.example` en remplaçant chaque `CHANGE_ME` par un secret aléatoire. Stdlib uniquement : pas de venv nécessaire. Refuse d'écraser un `.env` existant sans `--force`. | Une fois, avant le premier `docker compose up`. Après `--force`, faire aussi `docker compose down -v` : les mots de passe de la base changent. |
-| `scripts/smoke.py` | Parcours de bout en bout via la passerelle : inscription, mauvais mot de passe, connexion, API protégée, 2 comptes, paiement, rejeu idempotent, soldes, solde insuffisant, plafond, notification, intégrité de l'audit. Quitte avec un code ≠ 0 au premier échec. Nécessite `httpx`. | Après chaque démarrage, et juste avant la démo. `ADMIN_PASSWORD=... python scripts/smoke.py` ajoute la vérification de la chaîne d'audit. `BASE_URL=http://192.168.137.1:8080` pour le lancer depuis un autre poste. |
+| `scripts/gen_env.py` | Crée `.env` (configuration, sans secret) depuis `.env.example`. Stdlib uniquement. Refuse d'écraser un `.env` existant sans `--force`. | Automatique (`demarrer.cmd`). |
+| `scripts/secrets.py` | Secrets gardés dans Vault : `show` (identifiants de connexion), `get`, `set` (ex. webhook Discord), `db-creds` (identifiant PostgreSQL temporaire en lecture seule), `token` (interface web). Stdlib uniquement. | Pour se connecter, changer un secret, ouvrir DBeaver. Voir `docs/03-secrets-vault.md`. |
+| `scripts/smoke.py` | Parcours de bout en bout via la passerelle : inscription, mauvais mot de passe, connexion, API protégée, 2 comptes, paiement, rejeu idempotent, soldes, solde insuffisant, plafond, notification, intégrité de l'audit. Quitte avec un code ≠ 0 au premier échec. Nécessite `httpx`. | Après chaque démarrage, et juste avant la démo. `ADMIN_PASSWORD=$(python scripts/secrets.py get auth admin_password) python scripts/smoke.py` ajoute la vérification de la chaîne d'audit. Chaque exécution a son propre agent : le modèle ML peut bloquer une exécution (rafale atypique), jamais la suivante. `BASE_URL=http://192.168.137.1:8080` pour le lancer depuis un autre poste. |
 | `scripts/export_openapi.py` | Génère `docs/api/<service>.openapi.json` en important chaque application. Nécessite `pip install -r requirements-dev.txt`. | Après toute modification d'un endpoint. Livrable « documentation d'API ». |
 | `db/init/01-roles.sh` | Crée les 5 rôles `svc_*` (mots de passe issus de `.env`) et les 5 schémas. | Automatique, **uniquement à la création du volume `pgdata`**. |
 | `db/init/02-schema.sql` | Crée les tables et accorde les droits minimaux. | Idem. Modifier ce fichier n'a aucun effet sur une base existante : `docker compose down -v` pour réappliquer. |
@@ -224,21 +236,16 @@ resilience-alpha/
 
 ## 6. Configuration (.env)
 
-Le `.env` est généré par `gen_env.py` et **ne doit jamais être commité ni inclus dans l'archive de rendu**.
-Cible industrielle : migrer vers Vault ou SOPS.
+`.env` ne contient **que de la configuration** : aucun secret. Les secrets (clé JWT, mot de passe admin, de la
+sonde, de Grafana et du super-utilisateur PostgreSQL, webhook Discord) sont générés et gardés par **Vault** ; les
+services n'ont plus de mot de passe de base fixe (identifiants temporaires). Détail : `docs/03-secrets-vault.md`.
+`.env` reste hors de Git (valeurs propres au poste).
 
 | Variable | Défaut | Rôle |
 |---|---|---|
-| `JWT_SECRET` | généré | Clé de signature HS256, partagée par tous les services |
-| `POSTGRES_ADMIN_PASSWORD` | généré | Compte `pgadmin` (superuser), jamais utilisé par les services |
-| `AUTH_DB_PASSWORD`, `ACCOUNTS_DB_PASSWORD`, `PAYMENTS_DB_PASSWORD`, `NOTIFICATIONS_DB_PASSWORD`, `AUDIT_DB_PASSWORD` | généré | Mots de passe des rôles `svc_*` |
-| `ADMIN_PASSWORD` | généré | Mot de passe du compte `admin` créé au démarrage de `auth` (identifiant fixe : `admin`) |
-| `CANARY_PASSWORD` | généré | Mot de passe du compte `canary-bot`, créé automatiquement par la sonde |
-| `GRAFANA_ADMIN_PASSWORD` | généré | Compte `admin` de Grafana |
 | `LOG_LEVEL` | `INFO` | Niveau de log de tous les services |
 | `PAYMENT_MAX_AMOUNT` | `5000` | Plafond d'un paiement |
 | `CANARY_ALERTS_ENABLED` | `true` | Si `false`, la sonde mesure mais n'alerte pas (utile pour tester le détecteur ML seul) |
-| `DISCORD_WEBHOOK_URL` | vide | Webhook du salon Discord qui reçoit les alertes Grafana (secret). Vide = alertes dans Grafana seulement |
 | `TZ` | `Europe/Paris` | Fuseau des heures affichées dans les messages d'alerte |
 | `DETECTOR_BLOCK_TTL_SECONDS` | `600` | Durée d'un blocage par le détecteur ML |
 | `EDGE_RELAY` | `true` | Lance le relais d'IP réelle (Docker Desktop). Sous Linux : `false` et supprimer les deux lignes suivantes |
@@ -256,6 +263,7 @@ section `environment` du service concerné dans le compose) :
 | `RECONCILE_INTERVAL_SECONDS` | payments | 15 | Fréquence de rejeu des paiements `pending` |
 | `PROBE_INTERVAL_SECONDS` | canary | 5 | Fréquence de la transaction de sonde |
 | `PROBE_FAILURES_BEFORE_ALERT` | canary | 3 | Échecs consécutifs avant alerte |
+| `PROBE_STARTUP_GRACE_SECONDS` | canary | 120 | Démarrage de la pile : pas d'alerte tant qu'aucune transaction n'a réussi, dans cette limite |
 | `RECOVERY_TIMEOUT_SECONDS` | remediation | 90 | Attente maximale du retour d'un service |
 | `REMEDIATION_MAX_PER_WINDOW` / `REMEDIATION_WINDOW_SECONDS` | remediation | 3 / 600 | Disjoncteur : max de remédiations par service et fenêtre |
 
@@ -263,7 +271,8 @@ Variables **injectées par le compose** (adresses internes et connexion ; à ne 
 
 | Variable | Utilisée par | Valeur |
 |---|---|---|
-| `DATABASE_URL` | auth, accounts, payments, notifications, audit | `postgresql://svc_<service>:<mot de passe>@postgres:5432/resilience` |
+| `VAULT_ADDR`, `VAULT_ROLE`, `VAULT_DB_ROLE` | services, détecteur | `http://vault:8200`, nom du service : identité AppRole (`/run/vault`) et rôle d'identifiants de base |
+| `DATABASE_URL_TEMPLATE` | auth, accounts, payments, notifications, audit | `postgresql://{username}:{password}@postgres:5432/resilience` ; complété au démarrage avec l'identifiant temporaire délivré par Vault (`DATABASE_URL`) |
 | `AUDIT_URL`, `NOTIFICATIONS_URL` | tous (via `events.py`) | `http://audit:8000`, `http://notifications:8000` ; si absentes, l'émission est ignorée |
 | `ACCOUNTS_URL` | payments, remediation, canary | `http://accounts:8000` |
 | `CANARY_URL`, `REMEDIATION_URL` | remediation / canary | `http://canary:8000`, `http://remediation:8000` |
@@ -298,7 +307,7 @@ Gère les utilisateurs et délivre les jetons. Les mots de passe sont hachés av
 | `POST /api/auth/login` | public | Retourne un JWT. 401 identifiants invalides, 429 trop de tentatives |
 | `GET /api/auth/me` | jeton | Identité du porteur du jeton |
 
-- Au démarrage, crée le compte `admin` (rôle `admin`) si `ADMIN_PASSWORD` est défini.
+- Au démarrage, crée le compte `admin` (rôle `admin`) avec le mot de passe gardé dans Vault (`secret/resilience/auth`).
 - Anti-force brute à deux niveaux : Nginx (10 requêtes/min par IP sur le login, rafale de 5, puis 429) et le
   service (5 échecs par minute par IP **et** par compte, puis 429 avec `Retry-After`). Les compteurs sont en mémoire :
   ils sont remis à zéro quand le service redémarre.
@@ -629,7 +638,7 @@ Swagger (`/docs`) n'est pas accessible via la passerelle. La référence des end
 | `GET /api/audit/events` | **admin** | `?service=&action=&limit=` | liste d'événements |
 | `GET /api/audit/verify` | **admin** | | `{valid, checked, first_invalid_id}` |
 
-Compte `admin` : identifiant `admin`, mot de passe `ADMIN_PASSWORD` du `.env`. Un compte `canary-bot` existe aussi
+Compte `admin` : identifiant `admin`, mot de passe donné par `python scripts/secrets.py show` (gardé dans Vault). Un compte `canary-bot` existe aussi
 (la sonde) : ne pas l'afficher comme un vrai client.
 
 ### 9.3 Conventions de données
@@ -869,7 +878,7 @@ produit dans la page Supervision du front.
 
 ### 10.8 Alertes (livrées sur Discord)
 
-Quatorze règles Grafana provisionnées, évaluées toutes les 10 s : attaque bloquée par le ML, attaque bloquée par le
+Quinze règles Grafana provisionnées, évaluées toutes les 10 s : Vault scellé ou arrêté, attaque bloquée par le ML, attaque bloquée par le
 WAF, adresse IP bannie (WAF ou administrateur), force brute, limitation de débit (429), balayage (404), piste d'audit altérée, soldes incohérents, détecteur arrêté ou sans modèle,
 service indisponible, paiement de contrôle en échec, remédiation en échec, taux de 5xx. Détail, seuils et
 configuration du webhook : `docs/02-reprise-idempotence-ml.md` §3.13. Liste et état dans Grafana : Alertes >
@@ -925,7 +934,7 @@ documenter dans le PCA/PRA.
 | Prometheus, Loki | Sans authentification, non publiés | Ne jamais publier sans authentification |
 | Adresse IP client | Docker Desktop masque l'adresse source ; le relais de l'hôte la transmet au WAF (PROXY protocol), qui la passe à la passerelle (`X-Forwarded-For`, remplacé et non complété) ; chaque maillon ne croit que l'adresse fixe du précédent. Vérifié le 2026-10-20 : un client `192.168.1.49` est vu tel quel par le WAF, la passerelle et auth | Sans relais (`EDGE_RELAY=false` sous Docker Desktop), tous les clients extérieurs ont la même adresse (`10.250.0.1`) : ni ban d'IP, ni anti-force brute par IP distinctifs. Voir `docs/02-reprise-idempotence-ml.md` §3.1 |
 | Données | Un rôle et un schéma par service, ledger sans UPDATE/DELETE, `balance >= 0` en base | Le compte `pgadmin` (superuser) existe : ne pas l'exposer |
-| Secrets | `.env` généré aléatoirement, ignoré par Git | Migrer vers Vault ou SOPS ; ne jamais livrer `.env` dans l'archive |
+| Secrets | HashiCorp Vault : une identité AppRole et une politique par service (lecture de ses seuls secrets), identifiants PostgreSQL temporaires (1 h, révoqués à l'arrêt), audit de chaque accès, descellement automatique après redémarrage ; `.env` sans secret | Laboratoire : clé de descellement et jeton racine sur le PC Hôte (`.vault/`, hors Git), HTTP interne. Cible : KMS, TLS, `secret_id` à usage unique (`docs/03-secrets-vault.md` §8) |
 | Solde de démonstration | `initial_balance` permet un crédit fictif libre à l'ouverture | **Démo uniquement** : à supprimer en production |
 | Historique d'incidents | En mémoire dans `remediation` | Persister (audit et Loki en gardent la trace) |
 | Audit | Chaîne de hachage vérifiable | `verify` plafonné à 100 000 événements ; sans ancrage externe, une réécriture complète de la table reste possible pour un superuser |
@@ -943,7 +952,8 @@ Python 3.12 ; aucun secret dans le code, uniquement par variables d'environnemen
 | Symptôme | Cause probable et correction |
 |---|---|
 | `No module named 'httpx'` au lancement de `smoke.py` | `pip install httpx` (idéalement dans un venv) |
-| `requis - lancer python scripts/gen_env.py` au `docker compose up` | `.env` absent : lancer `gen_env.py` |
+| Un service reste « starting » ; journaux `vault_waiting` | Vault scellé ou en cours de configuration : `docker compose logs vault-keeper` (descellement automatique) |
+| `vault_keys_missing` (vault-keeper) | `.vault/init.json` perdu alors que Vault est initialisé : `docker compose down -v`, supprimer `.vault/`, relancer |
 | `password authentication failed` après avoir régénéré `.env` | La base garde les anciens mots de passe : `docker compose down -v` puis `up` |
 | Modification de `02-schema.sql` sans effet | Les scripts d'initialisation ne tournent qu'à la création du volume : `docker compose down -v` |
 | `bad interpreter` / erreur sur `01-roles.sh` | Fin de ligne Windows (CRLF) : `.gitattributes` impose LF ; reclonez ou convertissez le fichier |

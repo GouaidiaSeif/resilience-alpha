@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from . import vault
 from .config import env
 from .db import create_pool
 from .logs import log_event, request_id_var, setup_logging
@@ -33,6 +34,8 @@ def create_app(
 ) -> FastAPI:
     setup_logging(service, env("LOG_LEVEL", "INFO") or "INFO")
     log = logging.getLogger(service)
+    # Secrets (JWT, mots de passe, identifiant PostgreSQL temporaire) lus dans Vault si VAULT_ADDR est défini.
+    vault.load_secrets()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -49,6 +52,7 @@ def create_app(
                 await shutdown(app)
             if app.state.pool:
                 await app.state.pool.close()
+            vault.revoke()
             log_event(log, "service_stopped")
 
     app = FastAPI(title=f"RESILIENCE-ALPHA · {service}", version="0.1.0", lifespan=lifespan)

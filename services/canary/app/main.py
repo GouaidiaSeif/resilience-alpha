@@ -32,6 +32,9 @@ INTERVAL = float(env("PROBE_INTERVAL_SECONDS", "5") or 5)
 FAILURES_BEFORE_ALERT = int(env("PROBE_FAILURES_BEFORE_ALERT", "3") or 3)
 ALERTS_ENABLED = (env("CANARY_ALERTS_ENABLED", "true") or "true").lower() == "true"
 ALERT_COOLDOWN = 30.0
+# Démarrage à froid de la pile : les services attendent Vault et leurs identifiants de base. Pas d'alerte (donc pas de
+# redémarrage en plein démarrage) tant qu'aucune transaction n'a encore réussi, dans la limite de ce délai.
+STARTUP_GRACE = float(env("PROBE_STARTUP_GRACE_SECONDS", "120") or 120)
 SERVICES = ["auth", "accounts", "payments", "notifications"]
 CANARY_USER = env("CANARY_USERNAME", "canary-bot") or "canary-bot"
 PHASE_TO_SERVICE = {"login": "auth", "accounts": "accounts", "payment": "payments"}
@@ -60,6 +63,8 @@ class State:
         self.consecutive_failures = 0
         self.last_alert: dict[str, float] = {}
         self.lock = asyncio.Lock()
+        self.started = time.monotonic()
+        self.armed = False  # vrai dès la première transaction réussie : la plateforme a démarré
 
 
 async def _ensure_session(st: State, http: httpx.AsyncClient) -> None:
@@ -166,6 +171,9 @@ def _record(app: FastAPI, result: dict) -> None:
     if result["consistent"] is not None:
         CONSISTENT.set(1 if result["consistent"] else 0)
     if result["ok"]:
+        if not st.armed:
+            st.armed = True
+            log_event(log, "canary_armed", after_seconds=round(time.monotonic() - st.started, 1))
         LAST_OK.set(time.time())
         if st.consecutive_failures:
             log_event(log, "canary_recovered", after_failures=st.consecutive_failures)
@@ -174,7 +182,8 @@ def _record(app: FastAPI, result: dict) -> None:
         st.consecutive_failures += 1
         log_event(log, "canary_probe_failed", logging.WARNING, phase=result["failed_phase"], error=result["error"],
                   consecutive=st.consecutive_failures, down=[s for s, r in result["ready"].items() if not r])
-        if ALERTS_ENABLED and st.consecutive_failures >= FAILURES_BEFORE_ALERT:
+        starting = not st.armed and time.monotonic() - st.started < STARTUP_GRACE
+        if ALERTS_ENABLED and st.consecutive_failures >= FAILURES_BEFORE_ALERT and not starting:
             asyncio.create_task(_alert(app, result))
 
 

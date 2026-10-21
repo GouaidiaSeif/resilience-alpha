@@ -50,9 +50,7 @@ if (-not (Test-Path ".env")) {
     if ($LASTEXITCODE -ne 0) { throw "Échec de scripts/gen_env.py" }
 }
 $envText = Get-Content ".env" -Raw
-if (-not (Get-EnvValue $envText "DISCORD_WEBHOOK_URL")) {
-    Write-Warning "DISCORD_WEBHOOK_URL vide dans .env : les alertes resteront visibles dans Grafana, sans message Discord."
-}
+New-Item -ItemType Directory -Force ".vault" | Out-Null   # clés et identités Vault (créé ici pour en rester propriétaire)
 if (-not (Test-Path "ml/model/model.joblib")) {
     Write-Warning "ml/model/model.joblib absent (normalement fourni par le dépôt : git pull) : le détecteur ML démarre sans modèle et ne bloque rien."
 }
@@ -110,10 +108,14 @@ Write-Host ""
 Write-Host "Application     https://localhost:8443       (certificat autosigné : accepter l'avertissement)"
 Write-Host "API             https://localhost:8443/api   (ou http://localhost:8080/api)"
 foreach ($ip in $lan) { Write-Host "Depuis le réseau https://${ip}:8443" }
-Write-Host "Grafana         http://localhost:3000        (admin / GRAFANA_ADMIN_PASSWORD dans .env)"
+Write-Host "Grafana         http://localhost:3000"
 Write-Host "WAF et bans     http://localhost:3000/d/ra-waf   ·  Sécurité : https://localhost:8443/admin/security"
 Write-Host "Détection ML    http://localhost:3000/d/ra-detection"
 Write-Host "Alertes         http://localhost:3000/alerting/list"
+Write-Host "Vault           http://127.0.0.1:8200        (jeton : python scripts/secrets.py token)"
+Write-Host ""
+Write-Host "Identifiants (gardés dans Vault) :"
+python scripts/secrets.py show
 if (-not $relay) {
     Write-Host "IP réelle       relais désactivé (EDGE_RELAY) : sous Docker Desktop, tous les clients extérieurs ont la même adresse."
 }

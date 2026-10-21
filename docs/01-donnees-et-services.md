@@ -43,14 +43,19 @@ Navigateur / client ──► waf (ModSecurity, :8080 HTTP / :8443 HTTPS) ──
 | remediation | aucun | aucun | 8000 | non (interne) |
 | canary | aucun | aucun | 8000 | non (interne) |
 | detector (ML) | aucun | aucun | 8000 | `/api/security/*` (admin) ; contrôle avant chaque requête |
-| frontend | aucun | aucun | 3001 (local) | non : servi par le WAF, il appelle la passerelle |
+| frontend | aucun | aucun | 3001 (interne) | non : servi par le WAF, il appelle la passerelle |
+| vault | aucun | aucun | 8200 (`127.0.0.1`) | non : secrets, identités, identifiants PostgreSQL temporaires |
+| vault-keeper | aucun | aucun | — | non : initialise, descelle et configure Vault |
 | waf | aucun | aucun | 8080, 8443 (publiés) | c'est le point d'entrée |
 
 **Conventions transverses**
 
-- **Un schéma et un rôle par service.** Chaque service se connecte avec son propre rôle, dont le `search_path`
-  est réglé sur son schéma : les requêtes du code n'ont pas de préfixe (`SELECT * FROM payments`). Aucun service
-  n'exécute de DDL ; les tables sont créées par `db/init/02-schema.sql` à la création du volume.
+- **Un schéma et un rôle par service.** Les rôles `svc_<service>` sont des **groupes sans connexion** qui portent
+  les droits. Chaque service se connecte avec un **identifiant temporaire** créé par Vault au démarrage, membre de
+  son groupe (`v-approle-<service>-…`, valable 1 h, renouvelé, supprimé à l'arrêt ; voir `docs/03-secrets-vault.md`).
+  Le pool règle le `search_path` sur le schéma du service : les requêtes du code n'ont pas de préfixe
+  (`SELECT * FROM payments`). Aucun service n'exécute de DDL ; les tables sont créées par `db/init/02-schema.sql` à
+  la création du volume.
 - **Pas de clé étrangère entre schémas.** Les références d'un service à un autre (`owner_id`, `created_by`,
   `from_account`…) sont **logiques** : chaque service valide ce qu'il reçoit. Les domaines restent indépendants
   (un service peut être arrêté, restauré ou migré seul).
@@ -295,13 +300,13 @@ pour chaque requête hors santé (niveau WARNING si status ≥ 400). Toute excep
 | Élément | Détail |
 |---|---|
 | Mots de passe | bcrypt, tronqués à 72 octets (limite bcrypt), vérification dans un thread (calcul coûteux hors boucle) |
-| Jeton utilisateur | JWT **HS256** signé avec `JWT_SECRET`, claims `iss="resilience-alpha"`, `sub` (UUID), `role`, `username`, `iat`, `exp` (15 min), `jti` |
+| Jeton utilisateur | JWT **HS256** signé avec `JWT_SECRET` (gardé dans Vault, `secret/resilience/shared`), claims `iss="resilience-alpha"`, `sub` (UUID), `role`, `username`, `iat`, `exp` (15 min), `jti` |
 | Jeton de service | même format, `role="service"`, `sub=<nom du service>`, durée **60 s**, créé à chaque appel interne |
 | `require_roles(...)` | 401 sans jeton ou jeton invalide/expiré, 403 si le rôle n'est pas dans la liste |
 | `require_service(...)` | rôle `service` **et** `sub` dans la liste : un service ne peut appeler que les endpoints internes prévus pour lui |
 
-Limite assumée : tout service connaissant `JWT_SECRET` peut fabriquer n'importe quel jeton. Cible : clés
-asymétriques par service (Vault).
+Limite assumée : tout service connaissant `JWT_SECRET` peut fabriquer n'importe quel jeton. Cible : moteur
+`transit` de Vault ou clés asymétriques par service (seul auth signe).
 
 ### 3.3 Événements (`events.py`)
 
@@ -315,7 +320,16 @@ paramètres sont positionnels uniquement : `service` peut aussi figurer dans les
 
 `create_pool(dsn, schema)` : pool asyncpg (1 à 5 connexions, `command_timeout` 10 s, `search_path` = schéma),
 **30 tentatives espacées d'1 s** au démarrage (PostgreSQL peut démarrer après le service). `env(nom, défaut,
-required=True)` lit la configuration ; les secrets n'arrivent que par l'environnement.
+required=True)` lit la configuration.
+
+### 3.4 bis Secrets (`vault.py`)
+
+Appelé par `create_app` avant tout le reste, si `VAULT_ADDR` est défini : connexion AppRole avec l'identité du
+service (`/run/vault/role_id`, `secret_id`), lecture des secrets autorisés par sa politique (placés dans
+l'environnement : `jwt_secret` → `JWT_SECRET`, `admin_password` → `ADMIN_PASSWORD`…), identifiant PostgreSQL
+temporaire (`DATABASE_URL` composée à partir de `DATABASE_URL_TEMPLATE`). Réessaie 3 min si Vault est scellé ou
+pas encore prêt. Renouvelle jeton et bail toutes les 20 min ; révoque le bail à l'arrêt (utilisateur supprimé).
+Sans `VAULT_ADDR` (tests, développement), lit simplement l'environnement. Détail : `docs/03-secrets-vault.md`.
 
 ### 3.5 Logs (`logs.py`)
 
@@ -354,7 +368,7 @@ utilisateur), **service:x** (jeton de service du service x).
 |---|---|---|
 | `ACCESS_TTL_SECONDS` | 900 | Durée du JWT |
 | `LOGIN_MAX_FAILURES` / `LOGIN_WINDOW_SECONDS` | 5 / 60 | Seuil anti-force brute |
-| `ADMIN_PASSWORD`, `ADMIN_USERNAME` | –, `admin` | Compte administrateur |
+| `ADMIN_PASSWORD`, `ADMIN_USERNAME` | Vault (`secret/resilience/auth`), `admin` | Compte administrateur |
 
 Audit : `user_registered`, `login_success`, `login_failed`, `login_blocked` (avec `client_ip`).
 
@@ -508,8 +522,7 @@ partagées). Métriques `detector_*` et réglages : doc 02, sections 3.10 et 3.1
 ### 4.9 frontend — interface (BFF Next.js)
 
 Image `frontend/Dockerfile` (sortie « standalone », utilisateur non root, système de fichiers en lecture seule),
-conteneur `rsl-frontend`, servi par le WAF (`https://<hôte>:8443`) et publié en local seulement
-(`127.0.0.1:3001`, débogage). Page d'administration **Sécurité** (`/admin/security`) : liste des bans, ban et
+conteneur `rsl-frontend`, servi uniquement par le WAF (`https://<hôte>:8443`), sans port publié. Page d'administration **Sécurité** (`/admin/security`) : liste des bans, ban et
 levée, clients bloqués par le ML. Seul le serveur Next.js appelle la passerelle
 (`http://gateway:8080`, réseau `web`) ; le jeton JWT reste dans un cookie httpOnly. Adresse fixe `10.250.0.10`,
 exemptée par le détecteur ML (tous les utilisateurs de l'interface la partagent). `GET /bff/ping` sert de

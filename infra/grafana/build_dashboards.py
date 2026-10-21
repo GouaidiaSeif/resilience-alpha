@@ -372,6 +372,19 @@ p.append(logs("Déroulé des reprises",
               {"h": 9, "w": 15, "x": 9, "y": y}))
 y += 9
 
+p.append(text_row("Secrets (Vault)", y)); y += 1
+p.append(stat("Vault", "vault_core_unsealed : 1 si Vault est descellé. Scellé = les services ne peuvent plus lire leurs secrets en redémarrant ; vault-keeper le descelle automatiquement.",
+              [target("min(vault_core_unsealed)")], {"h": 4, "w": 6, "x": 0, "y": y},
+              mappings=[{"type": "value", "options": {"0": {"text": "Scellé", "color": CRIT}, "1": {"text": "Descellé", "color": GOOD}}}],
+              no_value="Injoignable"))
+p.append(stat("Baux actifs", "vault_expire_num_leases : jetons des services et identifiants PostgreSQL temporaires en cours de validité.",
+              [target("max(vault_expire_num_leases)")], {"h": 4, "w": 6, "x": 6, "y": y}, decimals=0))
+p.append(logs("Gardien de Vault",
+              "vault-keeper : initialisation, descellement (y compris après un redémarrage de Vault), secrets créés, identités renouvelées.",
+              '{service="vault-keeper"} | json | line_format "{{.event}}{{if .detail}} · {{.detail}}{{end}}{{if .path}} · {{.path}}{{end}}"',
+              {"h": 4, "w": 12, "x": 12, "y": y}))
+y += 4
+
 recovery = dashboard(
     "ra-recovery", "Resilience Alpha · Reprise autonome",
     "Avant / pendant / après un incident : disponibilité, preuve de reprise, remédiation. Annotations : alertes de la sonde, remédiations lancées, reprises prouvées.",

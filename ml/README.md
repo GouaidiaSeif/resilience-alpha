@@ -57,7 +57,7 @@ Pour une vraie mesure, évaluer sur une **autre** période que l'entraînement (
 ## Entraîner sur sa propre pile
 
 ```bash
-export LOKI_URL=http://localhost:3000/api/datasources/proxy/uid/loki GRAFANA_USER=admin GRAFANA_PASSWORD=<.env>
+export LOKI_URL=http://localhost:3000/api/datasources/proxy/uid/loki GRAFANA_USER=admin GRAFANA_PASSWORD=$(python scripts/secrets.py get grafana admin_password)
 docker compose stop detector        # pendant la collecte : sinon les attaques simulées sont bloquées (403) et faussent les données
 ml/.venv/Scripts/python ml/traffic.py normal --users 8 --duration 900   # 15 min de trafic légitime
 for a in scan enumeration flood payspam bruteforce; do ml/.venv/Scripts/python ml/traffic.py $a --duration 45; done

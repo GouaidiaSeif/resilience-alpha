@@ -13,27 +13,26 @@ passerelle (`/api/*`) et n'invente aucune fonctionnalité absente du backend.
 Le front fait partie de la pile : `scripts/start.ps1` (ou `docker compose up -d --build` à la racine) construit
 l'image (`frontend/Dockerfile`, sortie Next.js « standalone ») et lance le conteneur `rsl-frontend`. On y accède
 **par le WAF** : https://localhost:8443 (certificat autosigné), ou `https://<IP du PC Hôte>:8443` depuis un autre
-poste. Le port 3001 n'est publié qu'en local (http://127.0.0.1:3001, débogage sans WAF). Dans Docker, le front
+poste. Le conteneur ne publie aucun port : tout passe par le WAF. Dans Docker, le front
 joint la passerelle par `http://gateway:8080` sur le réseau `web`, avec l'adresse fixe `10.250.0.10` que le
 détecteur ML ne bloque jamais.
 
 **Ajouter une page** : le WAF ne transmet au front que ses pages connues. Ajouter la route à la liste de
 `waf/includes/waf_routes.conf.template` (sinon elle répond « Page introuvable »), puis `docker compose restart waf`.
 
-Développement (rechargement à chaud), pile démarrée :
+Développement (rechargement à chaud), pile démarrée : le serveur de développement tourne sur le PC, hors WAF.
 
 ```bash
-docker compose stop frontend    # libère le port 3001
 cd frontend
 npm install
 cp .env.example .env.local      # GATEWAY_URL=http://localhost:8080 par défaut
-npm run dev                     # http://localhost:3001
+npm run dev                     # http://localhost:3001 (le conteneur rsl-frontend reste servi par le WAF sur :8443)
 ```
 
 Hors Docker, le front n'a plus l'adresse exemptée : un usage intensif de l'interface peut être noté par le
 détecteur ML comme n'importe quel client. Contrôles : `npm run typecheck`, `npm run lint`.
 
-Compte administrateur : `admin` / `ADMIN_PASSWORD` du `.env` racine.
+Compte administrateur : `admin`, mot de passe donné par `python scripts/secrets.py show` (gardé dans Vault).
 
 ## Architecture
 

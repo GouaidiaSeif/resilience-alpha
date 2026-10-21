@@ -1,9 +1,8 @@
 # Livraison des alertes (règles : rules.json, générées par infra/grafana/build_alerts.py) sur un salon Discord.
 #
-# Webhook : Discord > paramètres du salon > Intégrations > Webhooks > Copier l'URL, puis dans .env :
-#   DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
-# et `docker compose up -d grafana`. Sans URL, les alertes restent visibles dans Grafana (Alertes > Règles)
-# et la livraison échoue sans bloquer le reste.
+# Webhook gardé dans Vault (secret/resilience/grafana, clé discord_webhook_url), rendu par vault-keeper dans un
+# fichier lu ici. Le définir : python scripts/secrets.py set grafana discord_webhook_url https://discord.com/api/webhooks/...
+# puis docker compose restart grafana. Sans webhook, les alertes restent visibles dans Grafana (Alertes > Règles).
 apiVersion: 1
 
 templates:
@@ -30,7 +29,7 @@ contactPoints:
       - uid: ra-discord
         type: discord
         settings:
-          url: ${DISCORD_WEBHOOK_URL}
+          url: $__file{/run/vault-rendered/discord_webhook_url}
           title: '{{ template "ra.title" . }}'
           message: '{{ template "ra.message" . }}'
           use_discord_username: false

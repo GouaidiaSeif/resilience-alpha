@@ -8,6 +8,7 @@
 *.cmd  text eol=crlf
 # Modèles nginx du WAF (montés dans un conteneur Linux) et lanceurs Windows
 *.template text eol=lf
+*.hcl text eol=lf
 
 # Données et modèle ML : octets identiques sur tous les postes (empreinte sha256 enregistrée dans model.json)
 *.jsonl  text eol=lf
