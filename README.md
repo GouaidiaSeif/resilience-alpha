@@ -172,6 +172,7 @@ resilience-alpha/
 ├── .gitignore / .dockerignore     # .env exclu de Git et des images
 ├── .gitattributes                 # force LF sur .sh/.sql/.yml/.conf (évite "bad interpreter" sous Windows)
 │
+├── Attack/                        # scripts d'attaque de la démonstration, lancés depuis le PC Attaquant (Attack/README.md)
 ├── waf/                           # WAF : modèles nginx (routes, TLS, en-têtes), règles maison et exclusions ModSecurity
 ├── gateway/
 │   └── nginx.conf                 # routage /api/*, contrôle du détecteur ML, limitation de débit du login, logs JSON
@@ -224,6 +225,7 @@ resilience-alpha/
 | `scripts/start.ps1`, `scripts/start.sh` | Lance toute la pile : démarre Docker Desktop si besoin (Windows), crée `.env` s'il manque, construit les images (sans Internet : démarre avec les images existantes), lance le relais d'IP réelle si `EDGE_RELAY=true`, attend les contrôles de santé, affiche les adresses (y compris celles du réseau local). | À chaque démarrage. |
 | `scripts/stop.ps1`, `scripts/stop.sh` (`arreter.cmd`) | Éteint le relais d'IP réelle puis la pile **sans supprimer les conteneurs** (`docker compose stop`) : tout est conservé, historique Grafana compris. | En fin de séance. Rallumer : `demarrer.cmd`. Remise à zéro : `docker compose down -v`. |
 | `scripts/edge_relay.py` | Relais TCP sur le PC Hôte : écoute 8080/8443 sur le réseau et transmet l'IP réelle au WAF (PROXY protocol). Le TLS reste terminé par le WAF. Bibliothèque standard uniquement. | Lancé par `start.ps1`/`start.sh` sous Docker Desktop (`EDGE_RELAY=true`). Inutile sous Linux. |
+| `Attack/attack_auth.py`, `Attack/attack_payments.py` | Scripts d'attaque (force brute, bourrage d'identifiants, déni de service) lancés depuis le PC Attaquant pour la démonstration. `aiohttp` requis ; cible la passerelle HTTP `:8080`. Détail : `Attack/README.md`. | Démonstration des défenses (WAF, détecteur ML, reprise). **Laboratoire uniquement.** |
 | `scripts/gen_env.py` | Crée `.env` (configuration, sans secret) depuis `.env.example`. Stdlib uniquement. Refuse d'écraser un `.env` existant sans `--force`. | Automatique (`demarrer.cmd`). |
 | `scripts/secrets.py` | Secrets gardés dans Vault : `show` (identifiants de connexion), `get`, `set` (ex. webhook Discord), `db-creds` (identifiant PostgreSQL temporaire en lecture seule), `token` (interface web). Stdlib uniquement. | Pour se connecter, changer un secret, ouvrir DBeaver. Voir `docs/03-secrets-vault.md`. |
 | `scripts/smoke.py` | Parcours de bout en bout via la passerelle : inscription, mauvais mot de passe, connexion, API protégée, 2 comptes, paiement, rejeu idempotent, soldes, solde insuffisant, plafond, notification, intégrité de l'audit. Quitte avec un code ≠ 0 au premier échec. Nécessite `httpx`. | Après chaque démarrage, et juste avant la démo. `ADMIN_PASSWORD=$(python scripts/secrets.py get auth admin_password) python scripts/smoke.py` ajoute la vérification de la chaîne d'audit. Chaque exécution a son propre agent : le modèle ML peut bloquer une exécution (rafale atypique), jamais la suivante. `BASE_URL=http://192.168.137.1:8080` pour le lancer depuis un autre poste. |

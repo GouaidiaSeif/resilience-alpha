@@ -227,3 +227,9 @@ Line endings: `.gitattributes` forces LF on sh/sql/yml/conf/py. CRLF on `01-role
   `scripts/secrets.py show|get|set|db-creds|token`. Port 3001 no longer published. smoke.py uses a per-run UA
   (ML used to block the 2nd run). Alert 15 "Vault scellé ou arrêté". Doc: docs/03-secrets-vault.md. 16 pytest.
   Bug found: Vault init response key is `keys_base64` (raw response now saved before parsing).
+
+- 2026-10-22: user added `Attack/` (capital A) with two attacker-side scripts (aiohttp, run from second PC / Kali
+  VM, target the HTTP gateway `:8080`): `attack_auth.py` (bruteforce / credential-stuffing on /api/auth/login),
+  `attack_payments.py` (authenticated volumetric DoS on /api/payments, creates `stress_` users + accounts, unique
+  idempotency keys). Both refuse non-192.168.137.0/24 targets without a typed `oui`. Documented: `Attack/README.md`,
+  README (tree + scripts table), docs/02 §3.12. Complement to `ml/traffic.py` (server-side lab generator). Not committed.

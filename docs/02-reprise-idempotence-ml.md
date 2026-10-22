@@ -544,7 +544,12 @@ Métriques collectées par Prometheus (cible `detector:8000`) et affichées dans
 1. Lancer la pile (`scripts/start.ps1`, relais d'IP réelle compris). Ouvrir Grafana « WAF et bans » et
    « Détection ML », le front (pages Sécurité et Supervision) et le salon Discord des alertes.
 2. Depuis le PC Attaquant : `BASE_URL=https://192.168.137.1:8443 python ml/traffic.py scan --duration 60`
-   (certificat autosigné accepté par le générateur ; `TLS_VERIFY=1` pour le vérifier).
+   (certificat autosigné accepté par le générateur ; `TLS_VERIFY=1` pour le vérifier). Pour une attaque depuis une
+   **machine distincte** (second PC ou VM Kali), avec sa vraie IP, utiliser plutôt les scripts dédiés du dossier
+   `Attack/` (cible la passerelle HTTP `:8080`, voir `Attack/README.md`) :
+   `python3 Attack/attack_auth.py --target http://192.168.137.1:8080 --mode bruteforce --duration 30` (force brute),
+   `python3 Attack/attack_payments.py --target http://192.168.137.1:8080 --users 5 --concurrency 150 --duration 45`
+   (déni de service authentifié sur les paiements).
 3. Montrer : les requêtes vers les fichiers sensibles sont bloquées par ModSecurity (règle 930130), le modèle
    bloque le client en ~10 s, l'**IP réelle** de l'attaquant apparaît dans la page Sécurité (origine WAF ou ML) ;
    toutes ses requêtes reçoivent 403, interface comprise ; Supervision : incident `escalated`, aucun
